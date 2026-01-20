@@ -1,5 +1,10 @@
-import { ArrowRight, CalendarClock, CheckSquare, Clock3, Upload } from 'lucide-react'
-import { useCounts, useAppStore } from '../state/useAppStore'
+import { useEffect, useMemo, useState } from 'react'
+import { Link } from 'react-router-dom'
+import { ArrowRight, CalendarClock, CheckSquare, Clock3, Loader2, Upload } from 'lucide-react'
+import { listMeetings } from '../lib/api'
+import type { Meeting } from '../lib/api'
+import { useAppStore } from '../state/useAppStore'
+import { useToast } from '../components/Toast'
 
 function StatCard({ label, value, icon: Icon, accent }: { label: string; value: string | number; icon: typeof ArrowRight; accent?: string }) {
   return (
@@ -10,10 +15,18 @@ function StatCard({ label, value, icon: Icon, accent }: { label: string; value: 
   )
 }
 
-function RecentMeetings() {
-  const meetings = useAppStore((s) => s.meetings.slice(0, 5))
-  const channels = useAppStore((s) => s.channels)
-  const channelName = (id: string) => channels.find((c) => c.id === id)?.name ?? 'Unknown'
+function RecentMeetings({ meetings, loading }: { meetings: Meeting[]; loading: boolean }) {
+  const recent = useMemo(() => meetings.slice(0, 5), [meetings])
+
+  if (loading) {
+    return (
+      <div className="rounded-card border border-border bg-sidebar/60 p-4">
+        <div className="flex items-center justify-center py-8">
+          <Loader2 className="h-6 w-6 animate-spin text-primary" />
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="rounded-card border border-border bg-sidebar/60 p-4">
@@ -22,59 +35,35 @@ function RecentMeetings() {
           <div className="text-sm text-text-secondary">Recent Meetings</div>
           <div className="text-lg font-semibold text-text-primary">Last 5 analyses</div>
         </div>
-        <button className="text-sm text-primary hover:text-white">View all</button>
+        <Link to="/meetings" className="text-sm text-primary hover:text-white">View all</Link>
       </div>
       <div className="space-y-3">
-        {meetings.map((m) => (
-          <div key={m.id} className="rounded-button border border-border/80 bg-background/50 px-3 py-3">
+        {recent.length === 0 && (
+          <div className="text-sm text-text-secondary py-4 text-center">No meetings yet. Upload a transcript to get started.</div>
+        )}
+        {recent.map((m) => (
+          <Link
+            key={m.id}
+            to={`/meetings/${m.id}`}
+            className="block rounded-button border border-border/80 bg-background/50 px-3 py-3 hover:border-primary/40 transition"
+          >
             <div className="flex items-center justify-between">
               <div>
                 <div className="text-text-primary font-semibold">{m.title}</div>
                 <div className="text-xs text-text-secondary flex gap-2">
                   <span>{new Date(m.date).toLocaleDateString()}</span>
-                  <span className="text-border">•</span>
-                  <span>{channelName(m.channelId)}</span>
-                  <span className="text-border">•</span>
-                  <span>{m.actionItemIds.length} action items</span>
+                  {m.topics && m.topics.length > 0 && (
+                    <>
+                      <span className="text-border">|</span>
+                      <span>{m.topics.slice(0, 2).join(', ')}</span>
+                    </>
+                  )}
                 </div>
               </div>
               <ArrowRight className="h-4 w-4 text-text-secondary" />
             </div>
-          </div>
+          </Link>
         ))}
-      </div>
-    </div>
-  )
-}
-
-function MyActionItems() {
-  const currentUserId = 'p2'
-  const items = useAppStore((s) => s.actionItems.filter((a) => a.ownerId === currentUserId).slice(0, 5))
-  const toggleStatus = useAppStore((s) => s.updateActionItem)
-
-  return (
-    <div className="rounded-card border border-border bg-sidebar/60 p-4">
-      <div className="mb-3 flex items-center justify-between">
-        <div>
-          <div className="text-sm text-text-secondary">My Action Items</div>
-          <div className="text-lg font-semibold text-text-primary">Assigned to you</div>
-        </div>
-      </div>
-      <div className="space-y-2">
-        {items.map((item) => (
-          <label key={item.id} className="flex items-start gap-2 rounded-button border border-border/60 bg-background/40 px-3 py-2 text-sm text-text-secondary">
-            <input
-              type="checkbox"
-              checked={item.status === 'done'}
-              onChange={(e) => toggleStatus(item.id, { status: e.target.checked ? 'done' : 'todo' })}
-            />
-            <div>
-              <div className="text-text-primary font-medium">{item.task}</div>
-              <div className="text-[11px] text-text-secondary">Due {item.due ? new Date(item.due).toLocaleDateString() : '—'}</div>
-            </div>
-          </label>
-        ))}
-        {items.length === 0 && <div className="text-sm text-text-secondary">No items assigned.</div>}
       </div>
     </div>
   )
@@ -86,7 +75,7 @@ function QuickUpload() {
     <div className="rounded-card border border-dashed border-border bg-background/40 p-4 text-center">
       <Upload className="mx-auto h-8 w-8 text-primary" />
       <div className="mt-2 text-lg font-semibold text-text-primary">Drop transcript here or click to upload</div>
-      <div className="text-sm text-text-secondary">Accepts .txt, .vtt; docx/pdf will prompt paste; max 500KB.</div>
+      <div className="text-sm text-text-secondary">Accepts .txt, .vtt; docx/pdf will prompt paste; max 10MB.</div>
       <button
         onClick={() => toggleUploadModal(true)}
         className="mt-3 inline-flex items-center gap-2 rounded-button bg-primary px-4 py-2 text-sm font-semibold text-white shadow-lg shadow-primary/20 hover:bg-primary/90"
@@ -98,23 +87,66 @@ function QuickUpload() {
 }
 
 export default function Dashboard() {
-  const { meetingsThisWeek, openActionItems, pendingFollowUps, hoursInMeetings } = useCounts()
+  const { addToast } = useToast()
+  const [meetings, setMeetings] = useState<Meeting[]>([])
+  const [loading, setLoading] = useState(true)
+  const [total, setTotal] = useState(0)
+
+  useEffect(() => {
+    async function fetchMeetings() {
+      try {
+        const { meetings: data, pagination } = await listMeetings(20, 0)
+        setMeetings(data)
+        setTotal(pagination.total)
+      } catch (error) {
+        console.error('Failed to load meetings:', error)
+        addToast({ type: 'error', title: 'Failed to load meetings' })
+      } finally {
+        setLoading(false)
+      }
+    }
+    fetchMeetings()
+  }, [addToast])
+
+  const now = new Date()
+  const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
+  const meetingsThisWeek = meetings.filter((m) => new Date(m.date) >= weekAgo).length
+  const hoursInMeetings = Math.round((meetings.length * 0.5 + Number.EPSILON) * 10) / 10
 
   return (
     <div className="space-y-6">
       <div className="grid gap-4 tablet:grid-cols-2 desktop:grid-cols-4">
         <StatCard label="Meetings this week" value={meetingsThisWeek} icon={CalendarClock} />
-        <StatCard label="Open action items" value={openActionItems} icon={CheckSquare} accent="text-warning" />
-        <StatCard label="Pending follow-ups" value={pendingFollowUps} icon={ArrowRight} accent="text-accent" />
-        <StatCard label="Hours in meetings" value={hoursInMeetings} icon={Clock3} accent="text-success" />
+        <StatCard label="Total meetings" value={total} icon={CheckSquare} accent="text-warning" />
+        <StatCard label="Recent uploads" value={meetings.length} icon={ArrowRight} accent="text-accent" />
+        <StatCard label="Est. hours" value={hoursInMeetings} icon={Clock3} accent="text-success" />
       </div>
 
       <div className="grid gap-4 desktop:grid-cols-3">
         <div className="desktop:col-span-2 space-y-4">
           <QuickUpload />
-          <RecentMeetings />
+          <RecentMeetings meetings={meetings} loading={loading} />
         </div>
-        <MyActionItems />
+        <div className="rounded-card border border-border bg-sidebar/60 p-4">
+          <div className="text-sm text-text-secondary">Quick Stats</div>
+          <div className="text-lg font-semibold text-text-primary mb-4">Meeting Intelligence</div>
+          <div className="space-y-3 text-sm text-text-secondary">
+            <div className="flex justify-between">
+              <span>Analyzed meetings</span>
+              <span className="text-text-primary">{meetings.filter((m) => m.summary).length}</span>
+            </div>
+            <div className="flex justify-between">
+              <span>Pending analysis</span>
+              <span className="text-text-primary">{meetings.filter((m) => !m.summary).length}</span>
+            </div>
+            <div className="flex justify-between">
+              <span>Projects tracked</span>
+              <span className="text-text-primary">
+                {[...new Set(meetings.flatMap((m) => m.projects || []))].length}
+              </span>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   )

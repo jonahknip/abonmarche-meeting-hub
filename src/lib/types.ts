@@ -1,5 +1,5 @@
 export type MeetingType = 'client' | 'internal' | 'one-on-one' | 'project'
-export type Sentiment = 'productive' | 'neutral' | 'tense'
+export type Sentiment = 'productive' | 'neutral' | 'tense' | 'unfocused'
 
 export interface Person {
   id: string
@@ -58,6 +58,7 @@ export interface Comment {
 
 export interface Settings {
   mockMode: boolean
+  claudeApiKey?: string
 }
 
 export interface UiState {
@@ -87,12 +88,15 @@ export interface AnalysisMetadata {
 }
 
 export interface AnalysisResult {
+  title: string
   summary: string
   keyDecisions: string[]
   topics: string[]
   sentiment: Sentiment
-  actionItems: Array<{ task: string; ownerId?: string; due?: string; status?: ActionItem['status'] }>
-  followUpDraft: string
+  actionItems: Array<{ task: string; owner?: string | null; deadline?: string | null; priority?: 'high' | 'medium' | 'low'; status?: ActionItem['status'] }>
+  followUpEmail: string
   insights: string[]
   riskFlags: string[]
+  relatedTopics: string[]
+  followUpDraft?: string
 }

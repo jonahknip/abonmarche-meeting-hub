@@ -1,12 +1,13 @@
 import { useEffect, useState } from 'react'
-import { BrowserRouter, NavLink, Outlet, Route, Routes, useLocation } from 'react-router-dom'
-import { BarChart3, CalendarClock, CheckSquare, ChevronDown, LayoutDashboard, MessageSquare, Settings, Users, Upload } from 'lucide-react'
+import { BrowserRouter, NavLink, Outlet, Route, Routes } from 'react-router-dom'
+import { BarChart3, CalendarClock, CheckSquare, ChevronDown, LayoutDashboard, MessageSquare, Settings as SettingsIcon, Users, Upload } from 'lucide-react'
 import { useAppStore } from './state/useAppStore'
 import Dashboard from './routes/Dashboard'
 import Meetings from './routes/Meetings'
 import ActionItems from './routes/ActionItems'
 import People from './routes/People'
 import Analytics from './routes/Analytics'
+import Settings from './routes/Settings'
 import { UploadModal } from './components/UploadModal'
 import MeetingDetail from './routes/MeetingDetail'
 import { ToastProvider } from './components/Toast'
@@ -19,11 +20,10 @@ const navItems = [
   { to: '/action-items', label: 'Action Items', icon: CheckSquare },
   { to: '/people', label: 'People', icon: Users },
   { to: '/analytics', label: 'Analytics', icon: BarChart3 },
+  { to: '/settings', label: 'Settings', icon: SettingsIcon },
 ]
 
 function Sidebar() {
-  const location = useLocation()
-  const channels = useAppStore((s) => s.channels)
   const toggleUploadModal = useAppStore((s) => s.toggleUploadModal)
   const toggleSidebar = useAppStore((s) => s.toggleSidebar)
   const sidebarOpen = useAppStore((s) => s.ui.sidebarOpen)
@@ -54,9 +54,9 @@ function Sidebar() {
         <div className="relative">
           <input
             className="w-full rounded-button bg-background/70 border border-border px-3 py-2 text-sm text-text-primary placeholder:text-text-secondary focus:outline-none focus:ring-2 focus:ring-primary/60"
-            placeholder="Search meetings, action items, people"
+            placeholder="Search meetings..."
           />
-          <kbd className="absolute right-2 top-1/2 -translate-y-1/2 rounded border border-border bg-background px-2 py-0.5 text-[10px] text-text-secondary">⌘K</kbd>
+          <kbd className="absolute right-2 top-1/2 -translate-y-1/2 rounded border border-border bg-background px-2 py-0.5 text-[10px] text-text-secondary">Cmd+K</kbd>
         </div>
       </div>
 
@@ -77,24 +77,6 @@ function Sidebar() {
         ))}
       </nav>
 
-      <div className="mt-4 px-4 text-xs font-semibold uppercase tracking-wide text-text-secondary flex items-center justify-between">
-        Channels
-        <button className="rounded-button border border-border px-2 py-1 text-text-secondary hover:text-text-primary hover:border-primary/50">+</button>
-      </div>
-      <div className="mt-2 space-y-1 px-2 overflow-y-auto">
-        {channels.map((channel) => (
-          <div
-            key={channel.id}
-            className={`flex items-center gap-2 rounded-button px-3 py-2 text-sm text-text-secondary hover:bg-white/5 ${
-              location.pathname.includes(channel.slug) ? 'bg-primary/15 text-text-primary border border-primary/30' : ''
-            }`}
-          >
-            <span className="text-text-secondary">#</span>
-            {channel.name}
-          </div>
-        ))}
-      </div>
-
       <div className="mt-auto border-t border-border px-4 py-4">
         <button
           onClick={() => toggleUploadModal(true)}
@@ -107,7 +89,7 @@ function Sidebar() {
             <div className="h-8 w-8 rounded-full bg-primary/20 border border-border grid place-items-center text-primary font-semibold">JL</div>
             <div>
               <div className="text-text-primary text-sm">Jordan Lee</div>
-              <div className="text-[11px] text-success">● Online</div>
+              <div className="text-[11px] text-success">Online</div>
             </div>
           </div>
           <ChevronDown className="h-4 w-4" />
@@ -126,7 +108,7 @@ function ShellLayout() {
   const toggleCommandPalette = useAppStore((s) => s.toggleCommandPalette)
 
   useEffect(() => {
-    ;(window as any)._setShortcutsOpen = setShortcutsOpen
+    ;(window as unknown as { _setShortcutsOpen: typeof setShortcutsOpen })._setShortcutsOpen = setShortcutsOpen
     const handler = (e: KeyboardEvent) => {
       const meta = e.metaKey || e.ctrlKey
       if (meta && e.key.toLowerCase() === 'k') {
@@ -141,9 +123,6 @@ function ShellLayout() {
         toggleUploadModal(false)
         toggleCommandPalette(false)
         setShortcutsOpen(false)
-      }
-      if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
-        // reserved for list navigation later
       }
     }
     window.addEventListener('keydown', handler)
@@ -160,14 +139,14 @@ function ShellLayout() {
               onClick={() => toggleSidebar()}
               className="tablet:hidden rounded-button border border-border bg-sidebar/80 px-2 py-1 text-text-secondary hover:text-text-primary"
             >
-              ☰
+              Menu
             </button>
             <div className="text-sm text-text-secondary">Workspace</div>
             <div className="text-base font-semibold text-text-primary">Abonmarche Meeting Hub</div>
           </div>
           <div className="flex items-center gap-3 text-text-secondary">
             <MessageSquare className="h-4 w-4" />
-            <Settings className="h-4 w-4" />
+            <SettingsIcon className="h-4 w-4" />
           </div>
         </header>
         <main className="px-4 py-6 tablet:px-6 desktop:px-10">
@@ -201,6 +180,7 @@ function App() {
             <Route path="action-items" element={<ActionItems />} />
             <Route path="people" element={<People />} />
             <Route path="analytics" element={<Analytics />} />
+            <Route path="settings" element={<Settings />} />
           </Route>
         </Routes>
       </BrowserRouter>

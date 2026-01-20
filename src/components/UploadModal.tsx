@@ -1,13 +1,12 @@
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useState } from 'react'
 import * as Dialog from '@radix-ui/react-dialog'
 import * as Tabs from '@radix-ui/react-tabs'
 import { useDropzone } from 'react-dropzone'
-import { CalendarClock, CheckCircle2, Loader2, Upload } from 'lucide-react'
+import { CalendarClock, CheckCircle2, Loader2, Monitor, Upload } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
-import { analyzeMeeting } from '../lib/claude'
-import type { AnalysisMetadata, MeetingType } from '../lib/types'
-import { useAppStore } from '../state/useAppStore'
+import { uploadTranscript, analyzeMeeting } from '../lib/api'
 import { useToast } from './Toast'
+import { parseVttTranscript } from '../lib/teams'
 
 const ACCEPT = {
   'text/plain': ['.txt'],
@@ -16,7 +15,7 @@ const ACCEPT = {
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx'],
 }
 
-const MAX_BYTES = 500 * 1024
+const MAX_BYTES = 10 * 1024 * 1024
 
 const steps: Array<{ key: 'uploading' | 'analyzing' | 'extracting' | 'done'; label: string }> = [
   { key: 'uploading', label: 'Uploading' },
@@ -31,22 +30,15 @@ interface UploadModalProps {
 }
 
 export function UploadModal({ open, onOpenChange }: UploadModalProps) {
-  const channels = useAppStore((s) => s.channels)
-  const people = useAppStore((s) => s.people)
-  const addMeeting = useAppStore((s) => s.addMeeting)
-  const updateMeeting = useAppStore((s) => s.updateMeeting)
-  const addActionItem = useAppStore((s) => s.addActionItem)
   const navigate = useNavigate()
   const { addToast } = useToast()
 
-  const [activeTab, setActiveTab] = useState<'drop' | 'paste'>('drop')
+  const [activeTab, setActiveTab] = useState<'drop' | 'paste' | 'teams'>('drop')
   const [transcript, setTranscript] = useState('')
   const [fileName, setFileName] = useState('')
   const [title, setTitle] = useState('')
   const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10))
-  const [channelId, setChannelId] = useState(channels[0]?.id ?? 'general')
-  const [type, setType] = useState<MeetingType>('internal')
-  const [participants, setParticipants] = useState<string[]>([])
+  const [uploadedFile, setUploadedFile] = useState<File | null>(null)
   const [preview, setPreview] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
@@ -58,7 +50,7 @@ export function UploadModal({ open, onOpenChange }: UploadModalProps) {
     if (!file) return
 
     if (file.size > MAX_BYTES) {
-      setError('File exceeds 500KB limit')
+      setError('File exceeds 10MB limit')
       return
     }
 
@@ -69,92 +61,58 @@ export function UploadModal({ open, onOpenChange }: UploadModalProps) {
     }
 
     const text = await file.text()
-    setTranscript(text)
+    const lower = file.name.toLowerCase()
+    let processedText = text
+    if (lower.endsWith('.vtt')) {
+      processedText = parseVttTranscript(text)
+    }
+
+    setTranscript(processedText)
+    setPreview(processedText.slice(0, 500))
     setFileName(file.name)
-    setPreview(text.slice(0, 500))
+    setUploadedFile(file)
     if (!title) setTitle(file.name.replace(/\.[^/.]+$/, '').replace(/[-_]/g, ' '))
   }, [title])
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({ accept: ACCEPT, multiple: false, onDrop })
 
-  const selectedParticipants = useMemo(
-    () => new Set(participants),
-    [participants],
-  )
-
-  const toggleParticipant = (id: string) => {
-    setParticipants((prev) => (prev.includes(id) ? prev.filter((p) => p !== id) : [...prev, id]))
-  }
-
-  const runAnalysis = async () => {
+  const handleAnalyze = async () => {
     setError(null)
     setSubmitting(true)
     setProgress('uploading')
-    const metadata: AnalysisMetadata = { title: title || 'Untitled meeting', date, channelId, type, participants }
-
-    const meetingId = addMeeting({
-      ...metadata,
-      participants,
-      transcript,
-      summary: '',
-      keyDecisions: [],
-      topics: [],
-      sentiment: 'neutral',
-      followUpDraft: '',
-      insights: [],
-      riskFlags: [],
-      relatedMeetingIds: [],
-    })
 
     try {
-      const result = await analyzeMeeting(transcript, metadata, {
-        onProgress: (step) => {
-          if (step === 'received') setProgress('uploading')
-          if (step === 'analyzing') setProgress('analyzing')
-          if (step === 'extracting') setProgress('extracting')
-          if (step === 'complete') setProgress('done')
-        },
-      })
+      const file = uploadedFile || new File([transcript], 'transcript.txt', { type: 'text/plain' })
 
-      const newActionIds: string[] = []
-      result.actionItems.forEach((ai, idx) => {
-        const ownerId = ai.ownerId || participants[idx % Math.max(participants.length, 1)] || ''
-        const id = addActionItem({
-          meetingId,
-          task: ai.task,
-          ownerId,
-          status: ai.status || 'todo',
-          due: ai.due,
-          order: idx,
-        })
-        newActionIds.push(id)
-      })
+      console.log('Step 1: Uploading transcript...')
+      const { meetingId } = await uploadTranscript(file, title || 'Untitled Meeting', date)
+      setProgress('analyzing')
 
-      updateMeeting(meetingId, {
-        summary: result.summary,
-        keyDecisions: result.keyDecisions,
-        topics: result.topics,
-        sentiment: result.sentiment,
-        followUpDraft: result.followUpDraft,
-        insights: result.insights,
-        riskFlags: result.riskFlags,
-        actionItemIds: newActionIds,
-      })
+      console.log('Step 2: Analyzing with Claude...', meetingId)
+      const { analysis } = await analyzeMeeting(meetingId)
+      setProgress('extracting')
 
+      console.log('Step 3: Complete', analysis)
       setProgress('done')
-      addToast({ type: 'success', title: 'Meeting analyzed!', description: `Found ${newActionIds.length} action items` })
+
+      addToast({
+        type: 'success',
+        title: 'Meeting analyzed!',
+        description: `Found ${analysis.actionItemsCount} action items, ${analysis.decisionsCount} decisions`,
+      })
+
       onOpenChange(false)
       navigate(`/meetings/${meetingId}`)
-    } catch (err: any) {
-      setError(err?.message || 'Upload failed')
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Analysis failed'
+      console.error('Analysis failed:', err)
+      setError(message)
       addToast({
         type: 'error',
         title: 'Analysis failed',
-        description: err?.message || 'Click to retry',
+        description: message,
         actionLabel: 'Retry',
-        onAction: () => {
-          runAnalysis()
-        },
+        onAction: () => handleAnalyze(),
       })
     } finally {
       setSubmitting(false)
@@ -163,6 +121,7 @@ export function UploadModal({ open, onOpenChange }: UploadModalProps) {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
+    console.log('Form submitted', { title, transcript: transcript.slice(0, 80) })
     setError(null)
 
     if (!transcript.trim()) {
@@ -170,14 +129,26 @@ export function UploadModal({ open, onOpenChange }: UploadModalProps) {
       return
     }
 
-    await runAnalysis()
+    if (transcript.trim().length < 100) {
+      setError('Transcript must be at least 100 characters')
+      return
+    }
+
+    await handleAnalyze()
   }
 
   const renderStep = (step: typeof steps[number]) => {
-    const isActive = steps.findIndex((s) => s.key === step.key) <= steps.findIndex((s) => s.key === progress)
+    const stepIndex = steps.findIndex((s) => s.key === step.key)
+    const currentIndex = steps.findIndex((s) => s.key === progress)
+    const isActive = progress !== 'idle' && stepIndex <= currentIndex
+
     return (
       <div key={step.key} className="flex items-center gap-2 text-sm">
-        {isActive ? <CheckCircle2 className="h-4 w-4 text-success" /> : <Loader2 className="h-4 w-4 animate-spin text-text-secondary" />}
+        {isActive ? (
+          <CheckCircle2 className="h-4 w-4 text-success" />
+        ) : (
+          <Loader2 className="h-4 w-4 animate-spin text-text-secondary" />
+        )}
         <span className={isActive ? 'text-text-primary' : 'text-text-secondary'}>{step.label}</span>
       </div>
     )
@@ -191,17 +162,20 @@ export function UploadModal({ open, onOpenChange }: UploadModalProps) {
           <div className="flex items-start justify-between gap-4">
             <div>
               <Dialog.Title className="text-xl font-semibold text-text-primary">New Meeting Upload</Dialog.Title>
-              <Dialog.Description className="text-sm text-text-secondary">Drop a transcript or paste text. Max 500KB. Txt/VTT parsed; docx/pdf will prompt paste.</Dialog.Description>
+              <Dialog.Description className="text-sm text-text-secondary">
+                Drop a transcript or paste text. Max 10MB. Txt/VTT parsed; docx/pdf will prompt paste.
+              </Dialog.Description>
             </div>
-            <Dialog.Close className="text-text-secondary hover:text-text-primary">✕</Dialog.Close>
+            <Dialog.Close className="text-text-secondary hover:text-text-primary">X</Dialog.Close>
           </div>
 
           <div className="mt-4 grid gap-4 tablet:grid-cols-2">
             <div className="space-y-3">
-              <Tabs.Root value={activeTab} onValueChange={(v) => setActiveTab(v as 'drop' | 'paste')}>
+              <Tabs.Root value={activeTab} onValueChange={(v) => setActiveTab(v as 'drop' | 'paste' | 'teams')}>
                 <Tabs.List className="mb-3 flex gap-2">
                   <Tabs.Trigger value="drop" className="rounded-button border border-border bg-background px-3 py-2 text-sm text-text-secondary data-[state=active]:border-primary/60 data-[state=active]:text-text-primary">Drop file</Tabs.Trigger>
                   <Tabs.Trigger value="paste" className="rounded-button border border-border bg-background px-3 py-2 text-sm text-text-secondary data-[state=active]:border-primary/60 data-[state=active]:text-text-primary">Paste text</Tabs.Trigger>
+                  <Tabs.Trigger value="teams" className="rounded-button border border-border bg-background px-3 py-2 text-sm text-text-secondary data-[state=active]:border-primary/60 data-[state=active]:text-text-primary">Import from Teams</Tabs.Trigger>
                 </Tabs.List>
 
                 <Tabs.Content value="drop">
@@ -225,8 +199,23 @@ export function UploadModal({ open, onOpenChange }: UploadModalProps) {
                     onChange={(e) => {
                       setTranscript(e.target.value)
                       setPreview(e.target.value.slice(0, 500))
+                      setUploadedFile(null)
                     }}
                   />
+                </Tabs.Content>
+
+                <Tabs.Content value="teams" className="space-y-4">
+                  <div className="text-center py-6 space-y-3">
+                    <Monitor className="w-10 h-10 mx-auto text-text-secondary" />
+                    <div className="text-lg font-semibold text-text-primary">Import from Microsoft Teams</div>
+                    <p className="text-sm text-text-secondary">Download your Teams transcript (.vtt or .docx) and use the Drop or Paste tabs to upload. Automatic Teams connection will be available once Graph permissions are configured.</p>
+                    <ol className="text-sm text-left max-w-md mx-auto space-y-2 text-text-secondary">
+                      <li>1. Open the Teams meeting chat</li>
+                      <li>2. Click the "Transcript" tab</li>
+                      <li>3. Click "Download" - choose .vtt or .docx</li>
+                      <li>4. Use the Drop tab to upload, or paste the text</li>
+                    </ol>
+                  </div>
                 </Tabs.Content>
               </Tabs.Root>
 
@@ -245,66 +234,20 @@ export function UploadModal({ open, onOpenChange }: UploadModalProps) {
                   className="w-full rounded-button border border-border bg-background px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-primary/60"
                   value={title}
                   onChange={(e) => setTitle(e.target.value)}
-                  required
+                  placeholder="Meeting title"
                 />
               </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-1">
-                  <label className="text-sm text-text-secondary">Date</label>
-                  <div className="relative">
-                    <CalendarClock className="pointer-events-none absolute left-2 top-1/2 h-4 w-4 -translate-y-1/2 text-text-secondary" />
-                    <input
-                      type="date"
-                      className="w-full rounded-button border border-border bg-background px-8 py-2 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-primary/60"
-                      value={date}
-                      onChange={(e) => setDate(e.target.value)}
-                    />
-                  </div>
-                </div>
-                <div className="space-y-1">
-                  <label className="text-sm text-text-secondary">Channel</label>
-                  <select
-                    className="w-full rounded-button border border-border bg-background px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-primary/60"
-                    value={channelId}
-                    onChange={(e) => setChannelId(e.target.value)}
-                  >
-                    {channels.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
 
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-1">
-                  <label className="text-sm text-text-secondary">Meeting type</label>
-                  <select
-                    className="w-full rounded-button border border-border bg-background px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-primary/60"
-                    value={type}
-                    onChange={(e) => setType(e.target.value as MeetingType)}
-                  >
-                    <option value="client">Client</option>
-                    <option value="internal">Internal</option>
-                    <option value="one-on-one">1:1</option>
-                    <option value="project">Project</option>
-                  </select>
-                </div>
-                <div className="space-y-1">
-                  <label className="text-sm text-text-secondary">Participants</label>
-                  <div className="flex flex-wrap gap-2 rounded-card border border-border bg-background px-2 py-2">
-                    {people.map((p) => (
-                      <button
-                        key={p.id}
-                        type="button"
-                        onClick={() => toggleParticipant(p.id)}
-                        className={`rounded-button px-2 py-1 text-xs ${selectedParticipants.has(p.id) ? 'bg-primary/20 text-text-primary border border-primary/50' : 'bg-background text-text-secondary border border-border'}`}
-                      >
-                        {p.name.split(' ')[0]}
-                      </button>
-                    ))}
-                  </div>
+              <div className="space-y-1">
+                <label className="text-sm text-text-secondary">Date</label>
+                <div className="relative">
+                  <CalendarClock className="pointer-events-none absolute left-2 top-1/2 h-4 w-4 -translate-y-1/2 text-text-secondary" />
+                  <input
+                    type="date"
+                    className="w-full rounded-button border border-border bg-background px-8 py-2 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-primary/60"
+                    value={date}
+                    onChange={(e) => setDate(e.target.value)}
+                  />
                 </div>
               </div>
 
@@ -325,7 +268,7 @@ export function UploadModal({ open, onOpenChange }: UploadModalProps) {
                 </Dialog.Close>
                 <button
                   type="submit"
-                  disabled={submitting}
+                  disabled={submitting || !transcript.trim()}
                   className="inline-flex items-center gap-2 rounded-button bg-primary px-4 py-2 text-sm font-semibold text-white shadow-lg shadow-primary/20 hover:bg-primary/90 disabled:opacity-60"
                 >
                   {submitting && <Loader2 className="h-4 w-4 animate-spin" />}
@@ -336,7 +279,7 @@ export function UploadModal({ open, onOpenChange }: UploadModalProps) {
           </div>
 
           <div className="mt-3 text-xs text-text-secondary">
-            Txt/VTT parsed locally. Docx/PDF currently ask for pasted text. Audio not supported yet. Max 500KB. Mock mode available via VITE_MOCK_MODE=true.
+            Txt/VTT parsed locally. Docx/PDF currently ask for pasted text. Audio not supported yet. Max 10MB.
           </div>
         </Dialog.Content>
       </Dialog.Portal>

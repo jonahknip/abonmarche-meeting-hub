@@ -1,22 +1,16 @@
 import dayjs from 'dayjs'
 import { Area, AreaChart, Bar, BarChart, CartesianGrid, Legend, Pie, PieChart, RadialBar, RadialBarChart, Tooltip, XAxis, YAxis, Cell } from 'recharts'
-import { Activity, BarChart3, CheckSquare, Clock3, Lightbulb, PieChart as PieIcon, TrendingUp, Calendar } from 'lucide-react'
-import { useMemo } from 'react'
+import { Activity, BarChart3, CheckSquare, Clock3, Lightbulb, PieChart as PieIcon, TrendingUp, Calendar, Loader2 } from 'lucide-react'
+import { useEffect, useMemo, useState } from 'react'
 import { useAppStore } from '../state/useAppStore'
+import { listMeetings, getMeeting } from '../lib/api'
+import type { Meeting, ActionItem, MeetingWithRelations } from '../lib/api'
+import { useToast } from '../components/Toast'
 
 const statusColors: Record<string, string> = {
   todo: '#f59e0b',
-  in_progress: '#3b82f6',
+  'in-progress': '#3b82f6',
   done: '#22c55e',
-  blocked: '#ef4444',
-}
-
-const typeColors: Record<string, string> = {
-  client: '#6366f1',
-  internal: '#8b5cf6',
-  'one-on-one': '#22c55e',
-  project: '#f59e0b',
-  other: '#94a3b8',
 }
 
 type Range = 'week' | 'month' | 'quarter' | 'all'
@@ -32,15 +26,42 @@ function filterByRange(date: string, range: Range) {
 }
 
 export default function Analytics() {
-  const meetings = useAppStore((s) => s.meetings)
-  const actionItems = useAppStore((s) => s.actionItems)
+  const { addToast } = useToast()
   const range = useAppStore((s) => s.ui.analyticsRange)
   const setRange = useAppStore((s) => s.setAnalyticsRange)
   const toggleUploadModal = useAppStore((s) => s.toggleUploadModal)
 
+  const [meetings, setMeetings] = useState<Meeting[]>([])
+  const [actionItems, setActionItems] = useState<ActionItem[]>([])
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    async function fetchData() {
+      try {
+        const { meetings: data } = await listMeetings(100, 0)
+        setMeetings(data)
+
+        const details = await Promise.all(data.map((m) => getMeeting(m.id).catch(() => null)))
+        const allActions: ActionItem[] = []
+        details.forEach((d) => {
+          if (d?.meeting) {
+            allActions.push(...(d.meeting as MeetingWithRelations).actionItems)
+          }
+        })
+        setActionItems(allActions)
+      } catch (error) {
+        console.error('Failed to load analytics:', error)
+        addToast({ type: 'error', title: 'Failed to load analytics' })
+      } finally {
+        setLoading(false)
+      }
+    }
+    fetchData()
+  }, [addToast])
+
   const filteredMeetings = useMemo(() => meetings.filter((m) => filterByRange(m.date, range)), [meetings, range])
   const filteredActionItems = useMemo(
-    () => actionItems.filter((a) => filteredMeetings.some((m) => m.id === a.meetingId)),
+    () => actionItems.filter((a) => filteredMeetings.some((m) => m.id === a.meeting_id)),
     [actionItems, filteredMeetings],
   )
 
@@ -61,28 +82,25 @@ export default function Analytics() {
   const meetingsOverTime = useMemo(() => {
     const buckets = new Map<string, number>()
     filteredMeetings.forEach((m) => {
-      const key = dayjs(m.date).format(range === 'week' ? 'MMM D' : range === 'month' ? 'MMM D' : 'MMM D')
+      const key = dayjs(m.date).format('MMM D')
       buckets.set(key, (buckets.get(key) || 0) + 1)
     })
     return Array.from(buckets.entries()).map(([date, count]) => ({ date, count }))
-  }, [filteredMeetings, range])
-
-  const meetingsByType = useMemo(() => {
-    const map = new Map<string, number>()
-    filteredMeetings.forEach((m) => {
-      map.set(m.type, (map.get(m.type) || 0) + 1)
-    })
-    return Array.from(map.entries()).map(([type, value]) => ({ name: type, value }))
   }, [filteredMeetings])
 
-  const meetingsByChannel = useMemo(() => {
+  const meetingsByTopic = useMemo(() => {
     const map = new Map<string, number>()
     filteredMeetings.forEach((m) => {
-      map.set(m.channelId, (map.get(m.channelId) || 0) + 1)
+      if (m.topics) {
+        m.topics.forEach((t) => {
+          map.set(t, (map.get(t) || 0) + 1)
+        })
+      }
     })
     return Array.from(map.entries())
-      .map(([channel, value]) => ({ channel, value }))
+      .map(([topic, value]) => ({ topic, value }))
       .sort((a, b) => b.value - a.value)
+      .slice(0, 8)
   }, [filteredMeetings])
 
   const actionByStatus = useMemo(() => {
@@ -103,14 +121,19 @@ export default function Analytics() {
     return arr[0]
   }, [filteredMeetings])
 
-  const mostActiveChannel = meetingsByChannel[0]
-
   const insights = [
     `You had ${totalMeetings} meetings this ${range}, totaling ~${meetingHours} hours`,
     busiestDay ? `Busiest day: ${busiestDay[0]} with ${busiestDay[1]} meetings` : null,
     `${completionRate}% of action items completed`,
-    mostActiveChannel ? `Most active channel: #${mostActiveChannel.channel}` : null,
   ].filter(Boolean) as string[]
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-20">
+        <Loader2 className="h-8 w-8 animate-spin text-primary" />
+      </div>
+    )
+  }
 
   if (!meetings.length) {
     return (
@@ -201,27 +224,12 @@ export default function Analytics() {
 
         <div className="rounded-card border border-border bg-sidebar/60 p-4">
           <div className="mb-2 flex items-center gap-2 text-text-primary font-semibold">
-            <PieIcon className="h-4 w-4 text-primary" /> Meetings by Type
+            <BarChart3 className="h-4 w-4 text-primary" /> Top Topics
           </div>
-          <PieChart width={500} height={250} className="w-full">
-            <Pie data={meetingsByType} dataKey="value" nameKey="name" cx="50%" cy="50%" innerRadius={60} outerRadius={90}>
-              {meetingsByType.map((entry) => (
-                <Cell key={entry.name} fill={typeColors[entry.name] || '#94a3b8'} />
-              ))}
-            </Pie>
-            <Legend />
-            <Tooltip contentStyle={{ background: '#16162a', border: '1px solid #2d2d4a', color: '#f1f5f9' }} />
-          </PieChart>
-        </div>
-
-        <div className="rounded-card border border-border bg-sidebar/60 p-4">
-          <div className="mb-2 flex items-center gap-2 text-text-primary font-semibold">
-            <BarChart3 className="h-4 w-4 text-primary" /> Meetings by Channel
-          </div>
-          <BarChart width={500} height={250} data={meetingsByChannel} layout="vertical" className="w-full">
+          <BarChart width={500} height={250} data={meetingsByTopic} layout="vertical" className="w-full">
             <CartesianGrid strokeDasharray="3 3" stroke="#2d2d4a" />
             <XAxis type="number" stroke="#94a3b8" tick={{ fill: '#94a3b8', fontSize: 12 }} allowDecimals={false} />
-            <YAxis dataKey="channel" type="category" stroke="#94a3b8" tick={{ fill: '#94a3b8', fontSize: 12 }} width={120} />
+            <YAxis dataKey="topic" type="category" stroke="#94a3b8" tick={{ fill: '#94a3b8', fontSize: 12 }} width={120} />
             <Tooltip contentStyle={{ background: '#16162a', border: '1px solid #2d2d4a', color: '#f1f5f9' }} />
             <Bar dataKey="value" fill="#6366f1" radius={[6, 6, 6, 6]} />
           </BarChart>
@@ -241,6 +249,21 @@ export default function Analytics() {
             <Tooltip contentStyle={{ background: '#16162a', border: '1px solid #2d2d4a', color: '#f1f5f9' }} />
           </PieChart>
         </div>
+
+        <div className="rounded-card border border-border bg-sidebar/60 p-4">
+          <div className="mb-2 flex items-center gap-2 text-text-primary font-semibold">
+            <PieIcon className="h-4 w-4 text-primary" /> Projects Mentioned
+          </div>
+          {filteredMeetings.some((m) => m.projects && m.projects.length > 0) ? (
+            <div className="flex flex-wrap gap-2 mt-4">
+              {[...new Set(filteredMeetings.flatMap((m) => m.projects || []))].slice(0, 12).map((p) => (
+                <span key={p} className="rounded-button border border-accent/50 bg-accent/10 px-3 py-1 text-sm text-accent">{p}</span>
+              ))}
+            </div>
+          ) : (
+            <div className="text-sm text-text-secondary py-4">No projects mentioned in meetings.</div>
+          )}
+        </div>
       </div>
 
       <div className="rounded-card border border-border bg-sidebar/60 p-4">
@@ -248,7 +271,7 @@ export default function Analytics() {
           <Lightbulb className="h-4 w-4 text-primary" /> Insights
         </div>
         <div className="space-y-1 text-sm text-text-secondary">
-          {insights.length ? insights.map((i, idx) => <div key={idx}>• {i}</div>) : <div>No insights yet.</div>}
+          {insights.length ? insights.map((i, idx) => <div key={idx}>- {i}</div>) : <div>No insights yet.</div>}
         </div>
       </div>
     </div>

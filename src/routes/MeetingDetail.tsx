@@ -1,60 +1,65 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import * as Tabs from '@radix-ui/react-tabs'
-import { ArrowLeft, ClipboardCopy, Loader2, MoreVertical, RefreshCw, Share, Wand2 } from 'lucide-react'
+import { ArrowLeft, ClipboardCopy, Loader2, MoreVertical, RefreshCw, Share } from 'lucide-react'
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
-import { analyzeMeeting } from '../lib/claude'
-import type { Meeting } from '../lib/types'
-import { useAppStore } from '../state/useAppStore'
+import { getMeeting, analyzeMeeting } from '../lib/api'
+import type { MeetingWithRelations } from '../lib/api'
 import { useToast } from '../components/Toast'
-
-const sentimentMap: Record<Meeting['sentiment'], { label: string; emoji: string }> = {
-  productive: { label: 'Productive', emoji: '😊' },
-  neutral: { label: 'Neutral', emoji: '😐' },
-  tense: { label: 'Tense', emoji: '😟' },
-}
 
 export default function MeetingDetail() {
   const { id } = useParams()
   const navigate = useNavigate()
   const { addToast } = useToast()
-  const meeting = useAppStore((s) => s.meetings.find((m) => m.id === id))
-  const channels = useAppStore((s) => s.channels)
-  const people = useAppStore((s) => s.people)
-  const actionItems = useAppStore((s) => s.actionItems.filter((a) => a.meetingId === id))
-  const updateMeeting = useAppStore((s) => s.updateMeeting)
-  const deleteMeeting = useAppStore((s) => s.deleteMeeting)
-  const updateActionItem = useAppStore((s) => s.updateActionItem)
-  const addActionItem = useAppStore((s) => s.addActionItem)
 
-  const [editingTitle, setEditingTitle] = useState(false)
-  const [titleDraft, setTitleDraft] = useState(meeting?.title ?? '')
-  const [searchTerm, setSearchTerm] = useState('')
-  const [followUpDraft, setFollowUpDraft] = useState(meeting?.followUpDraft ?? '')
+  const [meeting, setMeeting] = useState<MeetingWithRelations | null>(null)
+  const [loading, setLoading] = useState(true)
   const [reanalyzing, setReanalyzing] = useState(false)
 
-  const channelName = useMemo(
-    () => channels.find((c) => c.id === meeting?.channelId)?.name ?? 'Unknown',
-    [channels, meeting?.channelId],
-  )
+  const [editingTitle, setEditingTitle] = useState(false)
+  const [titleDraft, setTitleDraft] = useState('')
+  const [searchTerm, setSearchTerm] = useState('')
 
-  const relatedMeetings = useMemo(() => {
-    if (!meeting) return []
-    const participantSet = new Set(meeting.participants)
-    const topicSet = new Set(meeting.topics)
-    return useAppStore.getState().meetings
-      .filter((m) => m.id !== meeting.id)
-      .map((m) => {
-        const scoreChannel = m.channelId === meeting.channelId ? 1 : 0
-        const sharedParticipants = m.participants.filter((p) => participantSet.has(p)).length
-        const sharedTopics = m.topics.filter((t) => topicSet.has(t)).length
-        const score = scoreChannel + sharedParticipants * 0.5 + sharedTopics * 0.5
-        return { m, score }
-      })
-      .filter(({ score }) => score > 0)
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 4)
-  }, [meeting])
+  useEffect(() => {
+    async function fetchMeeting() {
+      if (!id) return
+
+      try {
+        const { meeting: data } = await getMeeting(id)
+        setMeeting(data)
+        setTitleDraft(data.title)
+      } catch (error) {
+        console.error('Failed to load meeting:', error)
+        addToast({ type: 'error', title: 'Meeting not found' })
+        navigate('/')
+      } finally {
+        setLoading(false)
+      }
+    }
+    fetchMeeting()
+  }, [id, navigate, addToast])
+
+  const filteredTranscript = useMemo(() => {
+    if (!meeting?.transcript || !searchTerm.trim()) return meeting?.transcript || ''
+    const regex = new RegExp(`(${escapeRegex(searchTerm)})`, 'gi')
+    return meeting.transcript.replace(regex, '<<$1>>')
+  }, [meeting?.transcript, searchTerm])
+
+  const highlightedTranscript = useMemo(() => {
+    return filteredTranscript.split('<<').flatMap((chunk, idx) => {
+      if (idx === 0) return [chunk]
+      const [match, ...rest] = chunk.split('>>')
+      return [<mark key={`m-${idx}`} className="bg-primary/30 text-text-primary">{match}</mark>, rest.join('>>')]
+    })
+  }, [filteredTranscript])
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-20">
+        <Loader2 className="h-8 w-8 animate-spin text-primary" />
+      </div>
+    )
+  }
 
   if (!meeting) {
     return (
@@ -67,90 +72,88 @@ export default function MeetingDetail() {
     )
   }
 
-  const sentiment = sentimentMap[meeting.sentiment]
-
-  const copyFollowUp = async () => {
-    await navigator.clipboard.writeText(followUpDraft || meeting.followUpDraft)
-    addToast({ type: 'success', title: 'Copied to clipboard' })
+  const copyToClipboard = async (text: string, message: string) => {
+    await navigator.clipboard.writeText(text)
+    addToast({ type: 'success', title: message })
   }
 
   const exportMarkdown = async () => {
-    const md = `# ${meeting.title}\n\n- Date: ${new Date(meeting.date).toLocaleString()}\n- Channel: ${channelName}\n- Type: ${meeting.type}\n- Sentiment: ${sentiment.label}\n\n## Summary\n${meeting.summary}\n\n## Key Decisions\n${meeting.keyDecisions.map((d) => `- ${d}`).join('\n') || '- None'}\n\n## Action Items\n${actionItems
-      .map((a) => `- [${a.status === 'done' ? 'x' : ' '}] ${a.task} (Owner: ${people.find((p) => p.id === a.ownerId)?.name || 'Unassigned'})`)
-      .join('\n') || '- None'}\n`
-    await navigator.clipboard.writeText(md)
-    addToast({ type: 'success', title: 'Exported markdown to clipboard' })
+    const md = `# ${meeting.title}
+
+- Date: ${new Date(meeting.date).toLocaleString()}
+- Topics: ${meeting.topics?.join(', ') || 'None'}
+- Projects: ${meeting.projects?.join(', ') || 'None'}
+
+## Summary
+${meeting.summary || 'No summary available.'}
+
+## Action Items
+${meeting.actionItems.map((a) => `- [${a.status === 'done' ? 'x' : ' '}] ${a.task} (${a.assignee || 'Unassigned'}, ${a.priority})`).join('\n') || '- None'}
+
+## Decisions
+${meeting.decisions.map((d) => `- ${d.decision}: ${d.context}`).join('\n') || '- None'}
+
+## Risks
+${meeting.risks.map((r) => `- [${r.severity.toUpperCase()}] ${r.risk}${r.mitigation ? ` - Mitigation: ${r.mitigation}` : ''}`).join('\n') || '- None'}
+
+## Follow-ups
+${meeting.followUps.map((f) => `- ${f.purpose} (${f.attendees.join(', ')})`).join('\n') || '- None'}
+`
+    await copyToClipboard(md, 'Exported markdown to clipboard')
   }
 
-  const handleDelete = () => {
-    if (!confirm('Delete this meeting? This cannot be undone.')) return
-    deleteMeeting(meeting.id)
-    addToast({ type: 'success', title: 'Meeting deleted' })
-    navigate('/meetings')
+  const handleShare = async () => {
+    await copyToClipboard(window.location.href, 'Link copied to clipboard')
   }
 
   const handleReanalyze = async () => {
     if (!confirm('This will replace the current analysis. Proceed?')) return
+
     setReanalyzing(true)
     try {
-      const result = await analyzeMeeting(meeting.transcript, {
-        title: meeting.title,
-        date: meeting.date,
-        channelId: meeting.channelId,
-        type: meeting.type,
-        participants: meeting.participants,
+      const { analysis } = await analyzeMeeting(meeting.id)
+      addToast({
+        type: 'success',
+        title: 'Reanalysis complete',
+        description: `Found ${analysis.actionItemsCount} action items`,
       })
 
-      const newActionIds: string[] = []
-      result.actionItems.forEach((ai, idx) => {
-        const ownerId = ai.ownerId || meeting.participants[idx % Math.max(meeting.participants.length, 1)] || ''
-        const id = addActionItem({
-          meetingId: meeting.id,
-          task: ai.task,
-          ownerId,
-          status: ai.status || 'todo',
-          due: ai.due,
-          order: idx,
-        })
-        newActionIds.push(id)
-      })
-
-      updateMeeting(meeting.id, {
-        summary: result.summary,
-        keyDecisions: result.keyDecisions,
-        topics: result.topics,
-        sentiment: result.sentiment,
-        followUpDraft: result.followUpDraft,
-        insights: result.insights,
-        riskFlags: result.riskFlags,
-        actionItemIds: newActionIds,
-      })
-
-      addToast({ type: 'success', title: 'Reanalysis complete', description: `Found ${newActionIds.length} action items` })
-    } catch (err: any) {
-      addToast({ type: 'error', title: 'Analysis failed', description: err?.message })
+      const { meeting: refreshed } = await getMeeting(meeting.id)
+      setMeeting(refreshed)
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Analysis failed'
+      addToast({ type: 'error', title: 'Analysis failed', description: message })
     } finally {
       setReanalyzing(false)
     }
   }
 
-  const filteredTranscript = useMemo(() => {
-    if (!searchTerm.trim()) return meeting.transcript
-    const regex = new RegExp(`(${escapeRegex(searchTerm)})`, 'gi')
-    return meeting.transcript.replace(regex, '<<$1>>')
-  }, [meeting.transcript, searchTerm])
+  const statusColors: Record<string, string> = {
+    todo: 'border-warning/50 bg-warning/10 text-warning',
+    'in-progress': 'border-primary/50 bg-primary/10 text-primary',
+    done: 'border-success/50 bg-success/10 text-success',
+  }
 
-  const highlightedTranscript = filteredTranscript.split('<<').flatMap((chunk, idx) => {
-    if (idx === 0) return [chunk]
-    const [match, ...rest] = chunk.split('>>')
-    return [<mark key={`m-${idx}`} className="bg-primary/30 text-text-primary">{match}</mark>, rest.join('>>')]
-  })
+  const priorityColors: Record<string, string> = {
+    high: 'border-danger/50 bg-danger/10 text-danger',
+    medium: 'border-warning/50 bg-warning/10 text-warning',
+    low: 'border-text-secondary/50 bg-text-secondary/10 text-text-secondary',
+  }
+
+  const severityColors: Record<string, string> = {
+    high: 'border-danger/50 bg-danger/10 text-danger',
+    medium: 'border-warning/50 bg-warning/10 text-warning',
+    low: 'border-success/50 bg-success/10 text-success',
+  }
 
   return (
     <div className="flex flex-col gap-4 desktop:flex-row">
       <div className="desktop:w-3/5 space-y-4">
         <div className="rounded-card border border-border bg-sidebar/60 p-4 shadow-panel">
-          <div className="mb-2 text-sm text-text-secondary">Meetings &gt; {meeting.title}</div>
+          <div className="mb-2 text-sm text-text-secondary">
+            <button onClick={() => navigate('/meetings')} className="hover:text-primary">Meetings</button>
+            {' > '}{meeting.title}
+          </div>
           <div className="flex flex-wrap items-start gap-3">
             <div className="flex-1">
               {editingTitle ? (
@@ -162,54 +165,39 @@ export default function MeetingDetail() {
                   />
                   <button
                     className="rounded-button bg-primary px-3 py-1 text-sm text-white"
-                    onClick={() => {
-                      updateMeeting(meeting.id, { title: titleDraft })
-                      setEditingTitle(false)
-                    }}
+                    onClick={() => setEditingTitle(false)}
                   >
-                    Save
+                    Done
                   </button>
                 </div>
               ) : (
-                <div className="text-2xl font-semibold text-text-primary" onClick={() => setEditingTitle(true)}>
+                <div
+                  className="text-2xl font-semibold text-text-primary cursor-pointer hover:text-primary"
+                  onClick={() => setEditingTitle(true)}
+                >
                   {meeting.title}
                 </div>
               )}
 
               <div className="mt-2 flex flex-wrap items-center gap-3 text-sm text-text-secondary">
                 <span>{new Date(meeting.date).toLocaleString()}</span>
-                <span className="rounded-button border border-border bg-background px-2 py-1 text-xs text-primary">{channelName}</span>
-                <span className="rounded-button border border-border bg-background px-2 py-1 text-xs text-text-secondary">{meeting.type}</span>
-                <span className="rounded-button border border-border bg-background px-2 py-1 text-xs text-text-secondary flex items-center gap-1">
-                  {sentiment.emoji} {sentiment.label}
-                </span>
-              </div>
-              <div className="mt-2 flex items-center gap-2">
-                {meeting.participants.slice(0, 5).map((pId) => {
-                  const person = people.find((p) => p.id === pId)
-                  const initials = person ? person.name.split(' ').map((n) => n[0]).join('').slice(0, 2) : '??'
-                  return (
-                    <div key={pId} className="h-8 w-8 rounded-full bg-primary/20 border border-border grid place-items-center text-primary text-sm font-semibold">
-                      {initials}
-                    </div>
-                  )
-                })}
-                {meeting.participants.length > 5 && (
-                  <div className="h-8 w-8 rounded-full border border-border bg-background text-text-secondary grid place-items-center text-xs">
-                    +{meeting.participants.length - 5}
-                  </div>
+                {meeting.topics && meeting.topics.length > 0 && (
+                  <span className="rounded-button border border-border bg-background px-2 py-1 text-xs text-primary">
+                    {meeting.topics.slice(0, 2).join(', ')}
+                  </span>
                 )}
               </div>
             </div>
             <div className="flex items-center gap-2">
               <button
                 onClick={handleReanalyze}
-                className="rounded-button border border-border px-3 py-2 text-sm text-text-primary hover:border-primary/50"
+                className="rounded-button border border-border px-3 py-2 text-sm text-text-primary hover:border-primary/50 flex items-center gap-1"
                 disabled={reanalyzing}
               >
-                {reanalyzing ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />} Reanalyze
+                {reanalyzing ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+                Reanalyze
               </button>
-              <button className="rounded-button border border-border px-3 py-2 text-sm text-text-secondary hover:border-primary/50">
+              <button onClick={handleShare} className="rounded-button border border-border px-3 py-2 text-sm text-text-secondary hover:border-primary/50">
                 <Share className="h-4 w-4" />
               </button>
               <DropdownMenu.Root>
@@ -220,15 +208,8 @@ export default function MeetingDetail() {
                 </DropdownMenu.Trigger>
                 <DropdownMenu.Portal>
                   <DropdownMenu.Content className="rounded-card border border-border bg-sidebar/90 p-2 text-sm text-text-primary shadow-lg">
-                    <DropdownMenu.Item className="cursor-pointer rounded-button px-2 py-1 hover:bg-white/5" onSelect={() => addToast({ type: 'info', title: 'Export as PDF coming soon' })}>
-                      Export as PDF
-                    </DropdownMenu.Item>
                     <DropdownMenu.Item className="cursor-pointer rounded-button px-2 py-1 hover:bg-white/5" onSelect={exportMarkdown}>
                       Export as Markdown
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Separator className="my-1 h-px bg-border" />
-                    <DropdownMenu.Item className="cursor-pointer rounded-button px-2 py-1 text-danger hover:bg-danger/10" onSelect={handleDelete}>
-                      Delete meeting
                     </DropdownMenu.Item>
                   </DropdownMenu.Content>
                 </DropdownMenu.Portal>
@@ -242,36 +223,38 @@ export default function MeetingDetail() {
             <Tabs.Trigger value="summary" className="rounded-button px-3 py-1 data-[state=active]:bg-primary/20 data-[state=active]:text-text-primary">Summary</Tabs.Trigger>
             <Tabs.Trigger value="transcript" className="rounded-button px-3 py-1 data-[state=active]:bg-primary/20 data-[state=active]:text-text-primary">Transcript</Tabs.Trigger>
             <Tabs.Trigger value="actions" className="rounded-button px-3 py-1 data-[state=active]:bg-primary/20 data-[state=active]:text-text-primary">Action Items</Tabs.Trigger>
-            <Tabs.Trigger value="followup" className="rounded-button px-3 py-1 data-[state=active]:bg-primary/20 data-[state=active]:text-text-primary">Follow-up</Tabs.Trigger>
+            <Tabs.Trigger value="decisions" className="rounded-button px-3 py-1 data-[state=active]:bg-primary/20 data-[state=active]:text-text-primary">Decisions</Tabs.Trigger>
           </Tabs.List>
 
           <Tabs.Content value="summary" className="space-y-4">
             <div className="rounded-card border-l-4 border-primary bg-primary/10 p-4 text-text-primary">
-              {meeting.summary || 'No summary yet.'}
+              {meeting.summary || 'No summary yet. Click Reanalyze to generate.'}
             </div>
+
             <div>
-              <div className="text-sm font-semibold text-text-primary">Key Decisions</div>
-              <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-text-secondary">
-                {meeting.keyDecisions.map((d, idx) => (
-                  <li key={idx}>{d}</li>
-                ))}
-                {meeting.keyDecisions.length === 0 && <li className="list-none text-text-secondary">No decisions captured.</li>}
-              </ul>
-            </div>
-            <div className="space-y-2">
-              <div className="text-sm font-semibold text-text-primary">Discussion Topics</div>
-              <div className="flex flex-wrap gap-2">
-                {meeting.topics.map((t) => (
-                  <span key={t} className="rounded-button border border-border bg-background px-2 py-1 text-xs text-text-secondary">
-                    {t}
-                  </span>
-                ))}
-                {meeting.topics.length === 0 && <span className="text-sm text-text-secondary">No topics captured.</span>}
+              <div className="text-sm font-semibold text-text-primary">Topics</div>
+              <div className="mt-2 flex flex-wrap gap-2">
+                {meeting.topics && meeting.topics.length > 0 ? (
+                  meeting.topics.map((t) => (
+                    <span key={t} className="rounded-button border border-border bg-background px-2 py-1 text-xs text-text-secondary">{t}</span>
+                  ))
+                ) : (
+                  <span className="text-sm text-text-secondary">No topics captured.</span>
+                )}
               </div>
             </div>
-            <div className="flex items-center gap-2 text-sm text-text-secondary">
-              <span>{sentiment.emoji}</span>
-              <span>{sentiment.label}</span>
+
+            <div>
+              <div className="text-sm font-semibold text-text-primary">Projects</div>
+              <div className="mt-2 flex flex-wrap gap-2">
+                {meeting.projects && meeting.projects.length > 0 ? (
+                  meeting.projects.map((p) => (
+                    <span key={p} className="rounded-button border border-accent/50 bg-accent/10 px-2 py-1 text-xs text-accent">{p}</span>
+                  ))
+                ) : (
+                  <span className="text-sm text-text-secondary">No projects mentioned.</span>
+                )}
+              </div>
             </div>
           </Tabs.Content>
 
@@ -285,147 +268,118 @@ export default function MeetingDetail() {
               />
               <span className="text-xs text-text-secondary">Highlights matches</span>
             </div>
-            <div className="rounded-card border border-border bg-background/60 p-3 text-sm leading-relaxed text-text-primary">
+            <div className="rounded-card border border-border bg-background/60 p-3 text-sm leading-relaxed text-text-primary max-h-96 overflow-y-auto whitespace-pre-wrap">
               {highlightedTranscript}
             </div>
           </Tabs.Content>
 
           <Tabs.Content value="actions" className="space-y-3">
-            <div className="space-y-2">
-              {actionItems.map((item) => (
-                <div key={item.id} className="flex flex-wrap items-center gap-3 rounded-card border border-border bg-background/60 px-3 py-2 text-sm">
-                  <input
-                    type="checkbox"
-                    checked={item.status === 'done'}
-                    onChange={(e) => updateActionItem(item.id, { status: e.target.checked ? 'done' : 'todo' })}
-                  />
-                  <div className="flex-1 text-text-primary">{item.task}</div>
-                  <select
-                    className="rounded-button border border-border bg-background px-2 py-1 text-xs text-text-primary"
-                    value={item.ownerId}
-                    onChange={(e) => updateActionItem(item.id, { ownerId: e.target.value })}
-                  >
-                    <option value="">Unassigned</option>
-                    {people.map((p) => (
-                      <option key={p.id} value={p.id}>
-                        {p.name}
-                      </option>
-                    ))}
-                  </select>
-                  <input
-                    type="date"
-                    className="rounded-button border border-border bg-background px-2 py-1 text-xs text-text-primary"
-                    value={item.due?.slice(0, 10) || ''}
-                    onChange={(e) => updateActionItem(item.id, { due: e.target.value })}
-                  />
-                  <span className="rounded-button border border-border bg-background px-2 py-1 text-[11px] text-text-secondary">Priority: Normal</span>
+            {meeting.actionItems.length === 0 ? (
+              <div className="text-sm text-text-secondary py-4">No action items found.</div>
+            ) : (
+              meeting.actionItems.map((item) => (
+                <div key={item.id} className="rounded-card border border-border bg-background/60 px-4 py-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex-1">
+                      <div className="text-text-primary font-medium">{item.task}</div>
+                      <div className="mt-1 flex flex-wrap items-center gap-2 text-xs">
+                        <span className={`rounded-button border px-2 py-0.5 ${statusColors[item.status] || ''}`}>
+                          {item.status}
+                        </span>
+                        <span className={`rounded-button border px-2 py-0.5 ${priorityColors[item.priority] || ''}`}>
+                          {item.priority}
+                        </span>
+                        {item.assignee && (
+                          <span className="text-text-secondary">Assigned to: {item.assignee}</span>
+                        )}
+                        {item.due_date && (
+                          <span className="text-text-secondary">Due: {new Date(item.due_date).toLocaleDateString()}</span>
+                        )}
+                      </div>
+                    </div>
+                    {item.confidence && (
+                      <span className="text-xs text-text-secondary">{Math.round(item.confidence * 100)}% confident</span>
+                    )}
+                  </div>
                 </div>
-              ))}
-              {actionItems.length === 0 && <div className="text-sm text-text-secondary">No action items.</div>}
-            </div>
-            <button
-              className="rounded-button border border-border px-3 py-2 text-sm text-text-primary hover:border-primary/50"
-              onClick={() => {
-                const id = addActionItem({
-                  meetingId: meeting.id,
-                  task: 'New action item',
-                  ownerId: meeting.participants[0] ?? '',
-                  status: 'todo',
-                  order: actionItems.length,
-                })
-                updateMeeting(meeting.id, { actionItemIds: [...meeting.actionItemIds, id] })
-              }}
-            >
-              Add action item
-            </button>
+              ))
+            )}
           </Tabs.Content>
 
-          <Tabs.Content value="followup" className="space-y-3">
-            <textarea
-              className="h-48 w-full rounded-card border border-border bg-background/60 p-3 text-sm text-text-primary placeholder:text-text-secondary focus:outline-none focus:ring-2 focus:ring-primary/60"
-              value={followUpDraft}
-              onChange={(e) => setFollowUpDraft(e.target.value)}
-            />
-            <div className="flex items-center gap-2">
-              <button
-                className="rounded-button border border-border px-3 py-2 text-sm text-text-primary hover:border-primary/50"
-                onClick={copyFollowUp}
-              >
-                <ClipboardCopy className="mr-2 inline h-4 w-4" /> Copy
-              </button>
-              <button
-                className="rounded-button border border-border px-3 py-2 text-sm text-text-primary hover:border-primary/50"
-                onClick={async () => {
-                  try {
-                    const result = await analyzeMeeting(meeting.transcript, {
-                      title: meeting.title,
-                      date: meeting.date,
-                      channelId: meeting.channelId,
-                      type: meeting.type,
-                      participants: meeting.participants,
-                    })
-                    setFollowUpDraft(result.followUpDraft)
-                    addToast({ type: 'success', title: 'Follow-up regenerated' })
-                  } catch (err: any) {
-                    addToast({ type: 'error', title: 'Regenerate failed', description: err?.message })
-                  }
-                }}
-              >
-                <Wand2 className="mr-2 inline h-4 w-4" /> Regenerate
-              </button>
-            </div>
+          <Tabs.Content value="decisions" className="space-y-3">
+            {meeting.decisions.length === 0 ? (
+              <div className="text-sm text-text-secondary py-4">No decisions captured.</div>
+            ) : (
+              meeting.decisions.map((d) => (
+                <div key={d.id} className="rounded-card border border-border bg-background/60 px-4 py-3">
+                  <div className="text-text-primary font-medium">{d.decision}</div>
+                  <div className="mt-1 text-sm text-text-secondary">{d.context}</div>
+                </div>
+              ))
+            )}
           </Tabs.Content>
         </Tabs.Root>
       </div>
 
       <div className="desktop:w-2/5 space-y-4">
         <div className="rounded-card border border-border bg-sidebar/60 p-4">
-          <div className="text-sm font-semibold text-text-primary">Meeting Intelligence</div>
-          <div className="mt-2 text-sm text-text-secondary">
-            <div className="font-semibold text-text-primary">Insights</div>
-            <ul className="mt-1 space-y-1">
-              {meeting.insights.length ? meeting.insights.map((i, idx) => <li key={idx}>• {i}</li>) : <li className="text-text-secondary">None</li>}
-            </ul>
-            <div className="mt-3 font-semibold text-text-primary">Risk Flags</div>
-            <div className="mt-1 flex flex-wrap gap-2">
-              {meeting.riskFlags.length ? meeting.riskFlags.map((r) => (
-                <span key={r} className="rounded-button border border-warning/50 bg-warning/10 px-2 py-1 text-xs text-warning">{r}</span>
-              )) : <span className="text-text-secondary text-sm">None</span>}
-            </div>
-            <div className="mt-3 font-semibold text-text-primary">Topics</div>
-            <div className="mt-1 flex flex-wrap gap-2">
-              {meeting.topics.length ? meeting.topics.map((t) => (
-                <span key={t} className="rounded-button border border-border bg-background px-2 py-1 text-xs text-text-secondary">{t}</span>
-              )) : <span className="text-text-secondary text-sm">None</span>}
-            </div>
-          </div>
-        </div>
-
-        <div className="rounded-card border border-border bg-sidebar/60 p-4">
-          <div className="text-sm font-semibold text-text-primary">Related Meetings</div>
-          <div className="mt-2 space-y-2 text-sm text-text-secondary">
-            {relatedMeetings.length ? (
-              relatedMeetings.map(({ m }) => (
-                <button
-                  key={m.id}
-                  onClick={() => navigate(`/meetings/${m.id}`)}
-                  className="w-full rounded-button border border-border bg-background px-3 py-2 text-left hover:border-primary/50"
-                >
-                  <div className="text-text-primary font-semibold">{m.title}</div>
-                  <div className="text-xs text-text-secondary">{new Date(m.date).toLocaleDateString()} • {channels.find((c) => c.id === m.channelId)?.name ?? m.channelId}</div>
-                </button>
-              ))
+          <div className="text-sm font-semibold text-text-primary">Risks</div>
+          <div className="mt-3 space-y-2">
+            {meeting.risks.length === 0 ? (
+              <span className="text-sm text-text-secondary">No risks identified.</span>
             ) : (
-              'None yet.'
+              meeting.risks.map((r) => (
+                <div key={r.id} className="rounded-button border border-border bg-background/50 px-3 py-2">
+                  <div className="flex items-center gap-2">
+                    <span className={`rounded-button border px-2 py-0.5 text-xs ${severityColors[r.severity] || ''}`}>
+                      {r.severity}
+                    </span>
+                    <span className="text-sm text-text-primary">{r.risk}</span>
+                  </div>
+                  {r.mitigation && (
+                    <div className="mt-1 text-xs text-text-secondary">Mitigation: {r.mitigation}</div>
+                  )}
+                </div>
+              ))
             )}
           </div>
         </div>
 
-        <div className="rounded-card border border-border bg-sidebar/60 p-4 space-y-3">
-          <div className="text-sm font-semibold text-text-primary">Comments</div>
-          <div className="space-y-2 text-sm text-text-secondary">Threaded replies coming soon.</div>
-          <textarea className="w-full rounded-card border border-border bg-background px-3 py-2 text-sm text-text-primary" placeholder="Add a comment" />
-          <button className="self-end rounded-button border border-border px-3 py-2 text-sm text-text-primary hover:border-primary/50">Post</button>
+        <div className="rounded-card border border-border bg-sidebar/60 p-4">
+          <div className="text-sm font-semibold text-text-primary">Follow-ups</div>
+          <div className="mt-3 space-y-2">
+            {meeting.followUps.length === 0 ? (
+              <span className="text-sm text-text-secondary">No follow-ups suggested.</span>
+            ) : (
+              meeting.followUps.map((f) => (
+                <div key={f.id} className="rounded-button border border-border bg-background/50 px-3 py-2">
+                  <div className="text-sm text-text-primary">{f.purpose}</div>
+                  <div className="mt-1 text-xs text-text-secondary">
+                    Attendees: {f.attendees.join(', ') || 'TBD'}
+                    {f.suggested_date && ` | Suggested: ${new Date(f.suggested_date).toLocaleDateString()}`}
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+
+        <div className="rounded-card border border-border bg-sidebar/60 p-4">
+          <div className="text-sm font-semibold text-text-primary mb-3">Quick Actions</div>
+          <div className="space-y-2">
+            <button
+              onClick={() => copyToClipboard(meeting.summary || '', 'Summary copied')}
+              className="w-full rounded-button border border-border px-3 py-2 text-sm text-text-secondary hover:border-primary/50 flex items-center gap-2"
+            >
+              <ClipboardCopy className="h-4 w-4" /> Copy Summary
+            </button>
+            <button
+              onClick={exportMarkdown}
+              className="w-full rounded-button border border-border px-3 py-2 text-sm text-text-secondary hover:border-primary/50 flex items-center gap-2"
+            >
+              <ClipboardCopy className="h-4 w-4" /> Export Markdown
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -433,5 +387,5 @@ export default function MeetingDetail() {
 }
 
 function escapeRegex(str: string) {
-  return str.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
