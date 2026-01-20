@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import * as Tabs from '@radix-ui/react-tabs'
-import { ArrowLeft, ClipboardCopy, Loader2, MoreVertical, RefreshCw, Share } from 'lucide-react'
+import { ArrowLeft, ClipboardCopy, Download, Loader2, MoreVertical, RefreshCw, Share } from 'lucide-react'
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
-import { getMeeting, analyzeMeeting } from '../lib/api'
+import { getMeeting, analyzeMeeting, downloadTranscript } from '../lib/api'
 import type { MeetingWithRelations } from '../lib/api'
 import { useToast } from '../components/Toast'
+import { parseTranscript, extractParticipants } from '../lib/teams'
 
 export default function MeetingDetail() {
   const { id } = useParams()
@@ -39,17 +40,28 @@ export default function MeetingDetail() {
     fetchMeeting()
   }, [id, navigate, addToast])
 
+  const parsedTranscript = useMemo(() => {
+    if (!meeting?.transcript) return null
+    return parseTranscript(meeting.transcript)
+  }, [meeting?.transcript])
+
+  const participants = useMemo(() => {
+    if (!meeting?.transcript) return []
+    return extractParticipants(meeting.transcript)
+  }, [meeting?.transcript])
+
   const filteredTranscript = useMemo(() => {
-    if (!meeting?.transcript || !searchTerm.trim()) return meeting?.transcript || ''
+    const text = parsedTranscript?.rawText || meeting?.transcript || ''
+    if (!searchTerm.trim()) return text
     const regex = new RegExp(`(${escapeRegex(searchTerm)})`, 'gi')
-    return meeting.transcript.replace(regex, '<<$1>>')
-  }, [meeting?.transcript, searchTerm])
+    return text.replace(regex, '<<$1>>')
+  }, [parsedTranscript, meeting?.transcript, searchTerm])
 
   const highlightedTranscript = useMemo(() => {
     return filteredTranscript.split('<<').flatMap((chunk, idx) => {
       if (idx === 0) return [chunk]
       const [match, ...rest] = chunk.split('>>')
-      return [<mark key={`m-${idx}`} className="bg-primary/30 text-text-primary">{match}</mark>, rest.join('>>')]
+      return [<mark key={`m-${idx}`} className="bg-primary/30 text-text-primary rounded px-0.5">{match}</mark>, rest.join('>>')]
     })
   }, [filteredTranscript])
 
@@ -77,29 +89,14 @@ export default function MeetingDetail() {
     addToast({ type: 'success', title: message })
   }
 
-  const exportMarkdown = async () => {
-    const md = `# ${meeting.title}
-
-- Date: ${new Date(meeting.date).toLocaleString()}
-- Topics: ${meeting.topics?.join(', ') || 'None'}
-- Projects: ${meeting.projects?.join(', ') || 'None'}
-
-## Summary
-${meeting.summary || 'No summary available.'}
-
-## Action Items
-${meeting.actionItems.map((a) => `- [${a.status === 'done' ? 'x' : ' '}] ${a.task} (${a.assignee || 'Unassigned'}, ${a.priority})`).join('\n') || '- None'}
-
-## Decisions
-${meeting.decisions.map((d) => `- ${d.decision}: ${d.context}`).join('\n') || '- None'}
-
-## Risks
-${meeting.risks.map((r) => `- [${r.severity.toUpperCase()}] ${r.risk}${r.mitigation ? ` - Mitigation: ${r.mitigation}` : ''}`).join('\n') || '- None'}
-
-## Follow-ups
-${meeting.followUps.map((f) => `- ${f.purpose} (${f.attendees.join(', ')})`).join('\n') || '- None'}
-`
-    await copyToClipboard(md, 'Exported markdown to clipboard')
+  const handleDownload = (format: 'txt' | 'md') => {
+    try {
+      downloadTranscript(meeting, format)
+      addToast({ type: 'success', title: `Downloaded as ${format.toUpperCase()}` })
+    } catch (err) {
+      console.error('Download failed:', err)
+      addToast({ type: 'error', title: 'Download failed' })
+    }
   }
 
   const handleShare = async () => {
@@ -181,6 +178,11 @@ ${meeting.followUps.map((f) => `- ${f.purpose} (${f.attendees.join(', ')})`).joi
 
               <div className="mt-2 flex flex-wrap items-center gap-3 text-sm text-text-secondary">
                 <span>{new Date(meeting.date).toLocaleString()}</span>
+                {participants.length > 0 && (
+                  <span className="text-xs text-text-secondary">
+                    {participants.length} participant{participants.length !== 1 ? 's' : ''}
+                  </span>
+                )}
                 {meeting.topics && meeting.topics.length > 0 && (
                   <span className="rounded-button border border-border bg-background px-2 py-1 text-xs text-primary">
                     {meeting.topics.slice(0, 2).join(', ')}
@@ -207,9 +209,28 @@ ${meeting.followUps.map((f) => `- ${f.purpose} (${f.attendees.join(', ')})`).joi
                   </button>
                 </DropdownMenu.Trigger>
                 <DropdownMenu.Portal>
-                  <DropdownMenu.Content className="rounded-card border border-border bg-sidebar/90 p-2 text-sm text-text-primary shadow-lg">
-                    <DropdownMenu.Item className="cursor-pointer rounded-button px-2 py-1 hover:bg-white/5" onSelect={exportMarkdown}>
-                      Export as Markdown
+                  <DropdownMenu.Content className="rounded-card border border-border bg-sidebar/95 p-2 text-sm text-text-primary shadow-lg min-w-[160px]">
+                    <DropdownMenu.Item 
+                      className="cursor-pointer rounded-button px-3 py-2 hover:bg-white/5 flex items-center gap-2" 
+                      onSelect={() => handleDownload('txt')}
+                    >
+                      <Download className="h-4 w-4" />
+                      Download as TXT
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item 
+                      className="cursor-pointer rounded-button px-3 py-2 hover:bg-white/5 flex items-center gap-2" 
+                      onSelect={() => handleDownload('md')}
+                    >
+                      <Download className="h-4 w-4" />
+                      Download as Markdown
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Separator className="my-1 border-t border-border" />
+                    <DropdownMenu.Item 
+                      className="cursor-pointer rounded-button px-3 py-2 hover:bg-white/5 flex items-center gap-2" 
+                      onSelect={() => copyToClipboard(meeting.transcript, 'Transcript copied')}
+                    >
+                      <ClipboardCopy className="h-4 w-4" />
+                      Copy Transcript
                     </DropdownMenu.Item>
                   </DropdownMenu.Content>
                 </DropdownMenu.Portal>
@@ -256,21 +277,51 @@ ${meeting.followUps.map((f) => `- ${f.purpose} (${f.attendees.join(', ')})`).joi
                 )}
               </div>
             </div>
+
+            {participants.length > 0 && (
+              <div>
+                <div className="text-sm font-semibold text-text-primary">Participants</div>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {participants.map((p) => (
+                    <span key={p} className="rounded-button border border-accent/50 bg-accent/10 px-2 py-1 text-xs text-accent">{p}</span>
+                  ))}
+                </div>
+              </div>
+            )}
           </Tabs.Content>
 
           <Tabs.Content value="transcript" className="space-y-3">
             <div className="flex items-center gap-2">
               <input
-                className="w-64 rounded-button border border-border bg-background px-3 py-2 text-sm text-text-primary placeholder:text-text-secondary focus:outline-none focus:ring-2 focus:ring-primary/60"
-                placeholder="Search transcript"
+                className="flex-1 max-w-xs rounded-button border border-border bg-background px-3 py-2 text-sm text-text-primary placeholder:text-text-secondary focus:outline-none focus:ring-2 focus:ring-primary/60"
+                placeholder="Search transcript..."
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
               />
-              <span className="text-xs text-text-secondary">Highlights matches</span>
+              {searchTerm && (
+                <button 
+                  onClick={() => setSearchTerm('')}
+                  className="text-xs text-text-secondary hover:text-text-primary"
+                >
+                  Clear
+                </button>
+              )}
+              <span className="text-xs text-text-secondary ml-auto">
+                {parsedTranscript?.format && `Format: ${parsedTranscript.format}`}
+              </span>
             </div>
-            <div className="rounded-card border border-border bg-background/60 p-3 text-sm leading-relaxed text-text-primary max-h-96 overflow-y-auto whitespace-pre-wrap">
-              {highlightedTranscript}
-            </div>
+            
+            {!meeting.transcript ? (
+              <div className="rounded-card border border-border bg-background/60 p-6 text-center text-text-secondary">
+                No transcript available.
+              </div>
+            ) : (
+              <div className="rounded-card border border-border bg-background/60 p-4 text-sm leading-relaxed text-text-primary max-h-[500px] overflow-y-auto">
+                <pre className="whitespace-pre-wrap font-sans">
+                  {highlightedTranscript}
+                </pre>
+              </div>
+            )}
           </Tabs.Content>
 
           <Tabs.Content value="actions" className="space-y-3">
@@ -369,15 +420,15 @@ ${meeting.followUps.map((f) => `- ${f.purpose} (${f.attendees.join(', ')})`).joi
           <div className="space-y-2">
             <button
               onClick={() => copyToClipboard(meeting.summary || '', 'Summary copied')}
-              className="w-full rounded-button border border-border px-3 py-2 text-sm text-text-secondary hover:border-primary/50 flex items-center gap-2"
+              className="w-full rounded-button border border-border px-3 py-2 text-sm text-text-secondary hover:border-primary/50 hover:text-text-primary flex items-center gap-2"
             >
               <ClipboardCopy className="h-4 w-4" /> Copy Summary
             </button>
             <button
-              onClick={exportMarkdown}
-              className="w-full rounded-button border border-border px-3 py-2 text-sm text-text-secondary hover:border-primary/50 flex items-center gap-2"
+              onClick={() => handleDownload('md')}
+              className="w-full rounded-button border border-border px-3 py-2 text-sm text-text-secondary hover:border-primary/50 hover:text-text-primary flex items-center gap-2"
             >
-              <ClipboardCopy className="h-4 w-4" /> Export Markdown
+              <Download className="h-4 w-4" /> Download Report
             </button>
           </div>
         </div>

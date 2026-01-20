@@ -2,17 +2,15 @@ import { useCallback, useState } from 'react'
 import * as Dialog from '@radix-ui/react-dialog'
 import * as Tabs from '@radix-ui/react-tabs'
 import { useDropzone } from 'react-dropzone'
-import { CalendarClock, CheckCircle2, Loader2, Monitor, Upload } from 'lucide-react'
+import { AlertCircle, CalendarClock, CheckCircle2, FileText, Loader2, Monitor, Upload, X } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { uploadTranscript, analyzeMeeting } from '../lib/api'
 import { useToast } from './Toast'
-import { parseVttTranscript } from '../lib/teams'
+import { parseTranscript, validateTranscript, detectTranscriptFormat } from '../lib/teams'
 
 const ACCEPT = {
   'text/plain': ['.txt'],
   'text/vtt': ['.vtt'],
-  'application/pdf': ['.pdf'],
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx'],
 }
 
 const MAX_BYTES = 10 * 1024 * 1024
@@ -34,15 +32,39 @@ export function UploadModal({ open, onOpenChange }: UploadModalProps) {
   const { addToast } = useToast()
 
   const [activeTab, setActiveTab] = useState<'drop' | 'paste' | 'teams'>('drop')
-  const [transcript, setTranscript] = useState('')
+  const [rawContent, setRawContent] = useState('')
+  const [parsedContent, setParsedContent] = useState('')
   const [fileName, setFileName] = useState('')
   const [title, setTitle] = useState('')
   const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10))
-  const [uploadedFile, setUploadedFile] = useState<File | null>(null)
-  const [preview, setPreview] = useState('')
+  const [detectedFormat, setDetectedFormat] = useState<string>('')
+  const [participants, setParticipants] = useState<string[]>([])
   const [error, setError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const [progress, setProgress] = useState<'idle' | 'uploading' | 'analyzing' | 'extracting' | 'done'>('idle')
+
+  const processContent = useCallback((content: string, source: string) => {
+    setError(null)
+    
+    const validation = validateTranscript(content)
+    if (!validation.valid) {
+      setError(validation.error || 'Invalid transcript')
+      return
+    }
+
+    const format = detectTranscriptFormat(content)
+    const parsed = parseTranscript(content)
+    
+    setRawContent(content)
+    setParsedContent(parsed.rawText)
+    setDetectedFormat(format)
+    setParticipants(parsed.participants)
+    
+    if (!title && source !== 'paste') {
+      const cleanName = source.replace(/\.[^/.]+$/, '').replace(/[-_]/g, ' ')
+      setTitle(cleanName)
+    }
+  }, [title])
 
   const onDrop = useCallback(async (acceptedFiles: File[]) => {
     setError(null)
@@ -56,36 +78,51 @@ export function UploadModal({ open, onOpenChange }: UploadModalProps) {
 
     const ext = file.name.toLowerCase()
     if (ext.endsWith('.pdf') || ext.endsWith('.docx')) {
-      setError('Docx/PDF not yet parsed. Please paste the transcript text.')
+      setError('PDF/DOCX files cannot be read directly. Please copy the transcript text and use the "Paste text" tab.')
       return
     }
 
-    const text = await file.text()
-    const lower = file.name.toLowerCase()
-    let processedText = text
-    if (lower.endsWith('.vtt')) {
-      processedText = parseVttTranscript(text)
+    try {
+      const text = await file.text()
+      setFileName(file.name)
+      processContent(text, file.name)
+    } catch (err) {
+      setError('Failed to read file. Please try pasting the content instead.')
+      console.error('File read error:', err)
     }
+  }, [processContent])
 
-    setTranscript(processedText)
-    setPreview(processedText.slice(0, 500))
-    setFileName(file.name)
-    setUploadedFile(file)
-    if (!title) setTitle(file.name.replace(/\.[^/.]+$/, '').replace(/[-_]/g, ' '))
-  }, [title])
+  const { getRootProps, getInputProps, isDragActive } = useDropzone({ 
+    accept: ACCEPT, 
+    multiple: false, 
+    onDrop 
+  })
 
-  const { getRootProps, getInputProps, isDragActive } = useDropzone({ accept: ACCEPT, multiple: false, onDrop })
+  const handlePaste = useCallback((value: string) => {
+    setRawContent(value)
+    if (value.trim().length > 50) {
+      processContent(value, 'paste')
+    } else {
+      setParsedContent('')
+      setDetectedFormat('')
+      setParticipants([])
+    }
+  }, [processContent])
 
   const handleAnalyze = async () => {
     setError(null)
     setSubmitting(true)
     setProgress('uploading')
 
-    try {
-      const file = uploadedFile || new File([transcript], 'transcript.txt', { type: 'text/plain' })
+    const contentToUpload = parsedContent || rawContent
 
-      console.log('Step 1: Uploading transcript...')
-      const { meetingId } = await uploadTranscript(file, title || 'Untitled Meeting', date)
+    try {
+      console.log('Step 1: Uploading transcript...', { 
+        length: contentToUpload.length,
+        format: detectedFormat 
+      })
+      
+      const { meetingId } = await uploadTranscript(contentToUpload, title || 'Untitled Meeting', date)
       setProgress('analyzing')
 
       console.log('Step 2: Analyzing with Claude...', meetingId)
@@ -101,18 +138,18 @@ export function UploadModal({ open, onOpenChange }: UploadModalProps) {
         description: `Found ${analysis.actionItemsCount} action items, ${analysis.decisionsCount} decisions`,
       })
 
+      resetForm()
       onOpenChange(false)
       navigate(`/meetings/${meetingId}`)
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Analysis failed'
       console.error('Analysis failed:', err)
       setError(message)
+      setProgress('idle')
       addToast({
         type: 'error',
         title: 'Analysis failed',
         description: message,
-        actionLabel: 'Retry',
-        onAction: () => handleAnalyze(),
       })
     } finally {
       setSubmitting(false)
@@ -121,125 +158,228 @@ export function UploadModal({ open, onOpenChange }: UploadModalProps) {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    console.log('Form submitted', { title, transcript: transcript.slice(0, 80) })
     setError(null)
 
-    if (!transcript.trim()) {
+    const contentToValidate = parsedContent || rawContent
+
+    if (!contentToValidate.trim()) {
       setError('Please provide a transcript')
       return
     }
 
-    if (transcript.trim().length < 100) {
-      setError('Transcript must be at least 100 characters')
+    if (contentToValidate.trim().length < 50) {
+      setError('Transcript must be at least 50 characters')
       return
     }
 
     await handleAnalyze()
   }
 
+  const resetForm = () => {
+    setRawContent('')
+    setParsedContent('')
+    setFileName('')
+    setTitle('')
+    setDate(new Date().toISOString().slice(0, 10))
+    setDetectedFormat('')
+    setParticipants([])
+    setError(null)
+    setProgress('idle')
+  }
+
   const renderStep = (step: typeof steps[number]) => {
     const stepIndex = steps.findIndex((s) => s.key === step.key)
     const currentIndex = steps.findIndex((s) => s.key === progress)
-    const isActive = progress !== 'idle' && stepIndex <= currentIndex
+    const isComplete = progress !== 'idle' && stepIndex < currentIndex
+    const isActive = progress === step.key
 
     return (
       <div key={step.key} className="flex items-center gap-2 text-sm">
-        {isActive ? (
+        {isComplete ? (
           <CheckCircle2 className="h-4 w-4 text-success" />
+        ) : isActive ? (
+          <Loader2 className="h-4 w-4 animate-spin text-primary" />
         ) : (
-          <Loader2 className="h-4 w-4 animate-spin text-text-secondary" />
+          <div className="h-4 w-4 rounded-full border border-text-secondary" />
         )}
-        <span className={isActive ? 'text-text-primary' : 'text-text-secondary'}>{step.label}</span>
+        <span className={isComplete || isActive ? 'text-text-primary' : 'text-text-secondary'}>
+          {step.label}
+        </span>
       </div>
     )
   }
 
+  const previewContent = parsedContent || rawContent
+  const hasContent = previewContent.trim().length > 0
+
   return (
-    <Dialog.Root open={open} onOpenChange={onOpenChange}>
+    <Dialog.Root open={open} onOpenChange={(isOpen) => {
+      if (!isOpen) resetForm()
+      onOpenChange(isOpen)
+    }}>
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 bg-black/60 backdrop-blur-sm" />
-        <Dialog.Content className="fixed left-1/2 top-1/2 w-[min(960px,90vw)] -translate-x-1/2 -translate-y-1/2 rounded-card border border-border bg-sidebar/95 p-6 shadow-2xl focus:outline-none">
+        <Dialog.Content className="fixed left-1/2 top-1/2 w-[min(960px,90vw)] max-h-[90vh] overflow-y-auto -translate-x-1/2 -translate-y-1/2 rounded-card border border-border bg-sidebar/95 p-6 shadow-2xl focus:outline-none">
           <div className="flex items-start justify-between gap-4">
             <div>
-              <Dialog.Title className="text-xl font-semibold text-text-primary">New Meeting Upload</Dialog.Title>
+              <Dialog.Title className="text-xl font-semibold text-text-primary">
+                New Meeting Upload
+              </Dialog.Title>
               <Dialog.Description className="text-sm text-text-secondary">
-                Drop a transcript or paste text. Max 10MB. Txt/VTT parsed; docx/pdf will prompt paste.
+                Drop a transcript file or paste text. Supports Teams VTT, plain text, and copy/paste formats.
               </Dialog.Description>
             </div>
-            <Dialog.Close className="text-text-secondary hover:text-text-primary">X</Dialog.Close>
+            <Dialog.Close className="rounded-button p-1 text-text-secondary hover:text-text-primary hover:bg-white/5">
+              <X className="h-5 w-5" />
+            </Dialog.Close>
           </div>
 
           <div className="mt-4 grid gap-4 tablet:grid-cols-2">
             <div className="space-y-3">
               <Tabs.Root value={activeTab} onValueChange={(v) => setActiveTab(v as 'drop' | 'paste' | 'teams')}>
                 <Tabs.List className="mb-3 flex gap-2">
-                  <Tabs.Trigger value="drop" className="rounded-button border border-border bg-background px-3 py-2 text-sm text-text-secondary data-[state=active]:border-primary/60 data-[state=active]:text-text-primary">Drop file</Tabs.Trigger>
-                  <Tabs.Trigger value="paste" className="rounded-button border border-border bg-background px-3 py-2 text-sm text-text-secondary data-[state=active]:border-primary/60 data-[state=active]:text-text-primary">Paste text</Tabs.Trigger>
-                  <Tabs.Trigger value="teams" className="rounded-button border border-border bg-background px-3 py-2 text-sm text-text-secondary data-[state=active]:border-primary/60 data-[state=active]:text-text-primary">Import from Teams</Tabs.Trigger>
+                  <Tabs.Trigger 
+                    value="drop" 
+                    className="rounded-button border border-border bg-background px-3 py-2 text-sm text-text-secondary data-[state=active]:border-primary/60 data-[state=active]:text-text-primary"
+                  >
+                    <Upload className="h-4 w-4 inline mr-1" />
+                    Drop file
+                  </Tabs.Trigger>
+                  <Tabs.Trigger 
+                    value="paste" 
+                    className="rounded-button border border-border bg-background px-3 py-2 text-sm text-text-secondary data-[state=active]:border-primary/60 data-[state=active]:text-text-primary"
+                  >
+                    <FileText className="h-4 w-4 inline mr-1" />
+                    Paste text
+                  </Tabs.Trigger>
+                  <Tabs.Trigger 
+                    value="teams" 
+                    className="rounded-button border border-border bg-background px-3 py-2 text-sm text-text-secondary data-[state=active]:border-primary/60 data-[state=active]:text-text-primary"
+                  >
+                    <Monitor className="h-4 w-4 inline mr-1" />
+                    Teams Help
+                  </Tabs.Trigger>
                 </Tabs.List>
 
                 <Tabs.Content value="drop">
                   <div
                     {...getRootProps()}
-                    className={`cursor-pointer rounded-card border-2 border-dashed p-4 text-center transition ${isDragActive ? 'border-primary bg-primary/5' : 'border-border bg-background/60'}`}
+                    className={`cursor-pointer rounded-card border-2 border-dashed p-6 text-center transition ${
+                      isDragActive 
+                        ? 'border-primary bg-primary/5' 
+                        : 'border-border bg-background/60 hover:border-primary/40'
+                    }`}
                   >
                     <input {...getInputProps()} />
-                    <Upload className="mx-auto h-8 w-8 text-primary" />
-                    <div className="mt-2 text-text-primary font-semibold">Drop transcript here or click to upload</div>
-                    <div className="text-sm text-text-secondary">Accepts .txt, .vtt. Docx/PDF will ask for paste.</div>
-                    {fileName && <div className="mt-2 text-xs text-text-secondary">Selected: {fileName}</div>}
+                    <Upload className="mx-auto h-10 w-10 text-primary" />
+                    <div className="mt-3 text-text-primary font-semibold">
+                      {isDragActive ? 'Drop it here!' : 'Drop transcript here or click to upload'}
+                    </div>
+                    <div className="mt-1 text-sm text-text-secondary">
+                      Accepts .txt, .vtt files (max 10MB)
+                    </div>
+                    {fileName && (
+                      <div className="mt-3 inline-flex items-center gap-2 rounded-button border border-success/50 bg-success/10 px-3 py-1 text-sm text-success">
+                        <FileText className="h-4 w-4" />
+                        {fileName}
+                      </div>
+                    )}
                   </div>
                 </Tabs.Content>
 
                 <Tabs.Content value="paste">
                   <textarea
-                    className="h-48 w-full rounded-card border border-border bg-background/60 p-3 text-sm text-text-primary placeholder:text-text-secondary focus:outline-none focus:ring-2 focus:ring-primary/60"
-                    placeholder="Paste transcript text"
-                    value={transcript}
-                    onChange={(e) => {
-                      setTranscript(e.target.value)
-                      setPreview(e.target.value.slice(0, 500))
-                      setUploadedFile(null)
-                    }}
+                    className="h-48 w-full rounded-card border border-border bg-background/60 p-3 text-sm text-text-primary placeholder:text-text-secondary focus:outline-none focus:ring-2 focus:ring-primary/60 resize-none"
+                    placeholder="Paste your meeting transcript here...
+
+Supported formats:
+• Teams VTT transcripts
+• Copy/paste from Teams transcript view
+• Plain text transcripts"
+                    value={rawContent}
+                    onChange={(e) => handlePaste(e.target.value)}
                   />
                 </Tabs.Content>
 
                 <Tabs.Content value="teams" className="space-y-4">
-                  <div className="text-center py-6 space-y-3">
-                    <Monitor className="w-10 h-10 mx-auto text-text-secondary" />
-                    <div className="text-lg font-semibold text-text-primary">Import from Microsoft Teams</div>
-                    <p className="text-sm text-text-secondary">Download your Teams transcript (.vtt or .docx) and use the Drop or Paste tabs to upload. Automatic Teams connection will be available once Graph permissions are configured.</p>
-                    <ol className="text-sm text-left max-w-md mx-auto space-y-2 text-text-secondary">
-                      <li>1. Open the Teams meeting chat</li>
-                      <li>2. Click the "Transcript" tab</li>
-                      <li>3. Click "Download" - choose .vtt or .docx</li>
-                      <li>4. Use the Drop tab to upload, or paste the text</li>
+                  <div className="rounded-card border border-border bg-background/60 p-4">
+                    <div className="flex items-center gap-2 text-lg font-semibold text-text-primary mb-3">
+                      <Monitor className="h-5 w-5 text-primary" />
+                      How to Export from Microsoft Teams
+                    </div>
+                    <ol className="space-y-3 text-sm text-text-secondary">
+                      <li className="flex gap-3">
+                        <span className="flex-shrink-0 w-6 h-6 rounded-full bg-primary/20 text-primary flex items-center justify-center text-xs font-semibold">1</span>
+                        <span>Open the Teams meeting chat or recording</span>
+                      </li>
+                      <li className="flex gap-3">
+                        <span className="flex-shrink-0 w-6 h-6 rounded-full bg-primary/20 text-primary flex items-center justify-center text-xs font-semibold">2</span>
+                        <span>Click the <strong>"Transcript"</strong> tab in the meeting details</span>
+                      </li>
+                      <li className="flex gap-3">
+                        <span className="flex-shrink-0 w-6 h-6 rounded-full bg-primary/20 text-primary flex items-center justify-center text-xs font-semibold">3</span>
+                        <span>Click <strong>"Download"</strong> and choose <strong>.vtt</strong> format (recommended)</span>
+                      </li>
+                      <li className="flex gap-3">
+                        <span className="flex-shrink-0 w-6 h-6 rounded-full bg-primary/20 text-primary flex items-center justify-center text-xs font-semibold">4</span>
+                        <span>Use the <strong>"Drop file"</strong> tab to upload, or copy the text and use <strong>"Paste text"</strong></span>
+                      </li>
                     </ol>
+                    <div className="mt-4 p-3 rounded-button bg-primary/5 border border-primary/20 text-sm text-text-secondary">
+                      <strong className="text-text-primary">Tip:</strong> You can also select all text from the Teams transcript viewer and paste it directly. The parser will automatically detect and format it.
+                    </div>
                   </div>
                 </Tabs.Content>
               </Tabs.Root>
 
-              <div className="rounded-card border border-border bg-background/50 p-3 text-sm text-text-secondary">
-                <div className="mb-2 text-xs uppercase tracking-wide text-text-secondary">Preview (first 500 chars)</div>
-                <div className="max-h-32 overflow-y-auto whitespace-pre-wrap text-text-primary">
-                  {preview || 'No transcript yet.'}
+              {hasContent && (
+                <div className="rounded-card border border-border bg-background/50 p-3">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-xs uppercase tracking-wide text-text-secondary">Preview</span>
+                    <div className="flex items-center gap-2">
+                      {detectedFormat && (
+                        <span className="text-xs rounded-button border border-primary/30 bg-primary/10 px-2 py-0.5 text-primary">
+                          {detectedFormat}
+                        </span>
+                      )}
+                      <span className="text-xs text-text-secondary">
+                        {previewContent.length.toLocaleString()} chars
+                      </span>
+                    </div>
+                  </div>
+                  {participants.length > 0 && (
+                    <div className="mb-2 flex flex-wrap gap-1">
+                      {participants.slice(0, 5).map(p => (
+                        <span key={p} className="text-xs rounded-button border border-accent/30 bg-accent/10 px-2 py-0.5 text-accent">
+                          {p}
+                        </span>
+                      ))}
+                      {participants.length > 5 && (
+                        <span className="text-xs text-text-secondary">+{participants.length - 5} more</span>
+                      )}
+                    </div>
+                  )}
+                  <div className="max-h-32 overflow-y-auto whitespace-pre-wrap text-sm text-text-primary font-mono bg-background/50 rounded p-2">
+                    {previewContent.slice(0, 800)}
+                    {previewContent.length > 800 && <span className="text-text-secondary">...</span>}
+                  </div>
                 </div>
-              </div>
+              )}
             </div>
 
             <form className="space-y-3" onSubmit={handleSubmit}>
               <div className="space-y-1">
-                <label className="text-sm text-text-secondary">Title</label>
+                <label className="text-sm text-text-secondary">Meeting Title</label>
                 <input
                   className="w-full rounded-button border border-border bg-background px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-primary/60"
                   value={title}
                   onChange={(e) => setTitle(e.target.value)}
-                  placeholder="Meeting title"
+                  placeholder="e.g., Weekly Team Standup"
                 />
               </div>
 
               <div className="space-y-1">
-                <label className="text-sm text-text-secondary">Date</label>
+                <label className="text-sm text-text-secondary">Meeting Date</label>
                 <div className="relative">
                   <CalendarClock className="pointer-events-none absolute left-2 top-1/2 h-4 w-4 -translate-y-1/2 text-text-secondary" />
                   <input
@@ -252,34 +392,38 @@ export function UploadModal({ open, onOpenChange }: UploadModalProps) {
               </div>
 
               <div className="rounded-card border border-border bg-background/50 p-3">
-                <div className="text-xs uppercase tracking-wide text-text-secondary">Progress</div>
-                <div className="mt-2 grid grid-cols-2 gap-2 text-sm">
+                <div className="text-xs uppercase tracking-wide text-text-secondary mb-2">Progress</div>
+                <div className="grid grid-cols-2 gap-2">
                   {steps.map((s) => renderStep(s))}
                 </div>
               </div>
 
-              {error && <div className="rounded-button border border-danger/40 bg-danger/10 px-3 py-2 text-sm text-danger">{error}</div>}
+              {error && (
+                <div className="flex items-start gap-2 rounded-button border border-danger/40 bg-danger/10 px-3 py-2 text-sm text-danger">
+                  <AlertCircle className="h-4 w-4 flex-shrink-0 mt-0.5" />
+                  <span>{error}</span>
+                </div>
+              )}
 
-              <div className="flex items-center justify-end gap-2">
+              <div className="flex items-center justify-end gap-2 pt-2">
                 <Dialog.Close asChild>
-                  <button type="button" className="rounded-button border border-border px-4 py-2 text-sm text-text-secondary hover:border-primary/40">
+                  <button 
+                    type="button" 
+                    className="rounded-button border border-border px-4 py-2 text-sm text-text-secondary hover:border-primary/40 hover:text-text-primary"
+                  >
                     Cancel
                   </button>
                 </Dialog.Close>
                 <button
                   type="submit"
-                  disabled={submitting || !transcript.trim()}
-                  className="inline-flex items-center gap-2 rounded-button bg-primary px-4 py-2 text-sm font-semibold text-white shadow-lg shadow-primary/20 hover:bg-primary/90 disabled:opacity-60"
+                  disabled={submitting || !hasContent}
+                  className="inline-flex items-center gap-2 rounded-button bg-primary px-4 py-2 text-sm font-semibold text-white shadow-lg shadow-primary/20 hover:bg-primary/90 disabled:opacity-60 disabled:cursor-not-allowed"
                 >
                   {submitting && <Loader2 className="h-4 w-4 animate-spin" />}
                   Analyze Meeting
                 </button>
               </div>
             </form>
-          </div>
-
-          <div className="mt-3 text-xs text-text-secondary">
-            Txt/VTT parsed locally. Docx/PDF currently ask for pasted text. Audio not supported yet. Max 10MB.
           </div>
         </Dialog.Content>
       </Dialog.Portal>

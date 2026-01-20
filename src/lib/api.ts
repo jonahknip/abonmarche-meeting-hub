@@ -87,30 +87,47 @@ class ApiError extends Error {
 }
 
 async function handleResponse<T>(response: Response): Promise<T> {
-  const data = await response.json()
-
-  if (!response.ok || !data.success) {
-    throw new ApiError(data.error || 'Request failed', response.status)
+  let data: Record<string, unknown>
+  
+  try {
+    data = await response.json()
+  } catch {
+    throw new ApiError('Invalid server response', response.status)
   }
 
-  return data
+  if (!response.ok || !data.success) {
+    const errorMessage = typeof data.error === 'string' ? data.error : 'Request failed'
+    throw new ApiError(errorMessage, response.status)
+  }
+
+  return data as T
 }
 
 export async function uploadTranscript(
-  file: File,
+  transcriptContent: string,
   title?: string,
   date?: string
 ): Promise<{ meetingId: string }> {
-  const formData = new FormData()
-  formData.append('transcript', file)
-  if (title) formData.append('title', title)
-  if (date) formData.append('date', date)
+  if (!transcriptContent || transcriptContent.trim().length < 50) {
+    throw new ApiError('Transcript must be at least 50 characters', 400)
+  }
 
-  console.log('Uploading transcript:', { fileName: file.name, fileSize: file.size, title })
+  console.log('Uploading transcript:', { 
+    contentLength: transcriptContent.length, 
+    title,
+    preview: transcriptContent.slice(0, 100) 
+  })
 
   const response = await fetch(`${API_BASE}/api/upload`, {
     method: 'POST',
-    body: formData,
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      transcript: transcriptContent,
+      title: title || 'Untitled Meeting',
+      date: date || new Date().toISOString(),
+    }),
   })
 
   const data = await handleResponse<{ success: boolean; meetingId: string; message: string }>(response)
@@ -120,6 +137,10 @@ export async function uploadTranscript(
 }
 
 export async function analyzeMeeting(meetingId: string): Promise<{ analysis: AnalysisResult }> {
+  if (!meetingId) {
+    throw new ApiError('Meeting ID is required', 400)
+  }
+  
   console.log('Requesting analysis for meeting:', meetingId)
 
   const response = await fetch(`${API_BASE}/api/analyze`, {
@@ -137,6 +158,10 @@ export async function analyzeMeeting(meetingId: string): Promise<{ analysis: Ana
 }
 
 export async function getMeeting(id: string): Promise<{ meeting: MeetingWithRelations }> {
+  if (!id) {
+    throw new ApiError('Meeting ID is required', 400)
+  }
+  
   console.log('Fetching meeting:', id)
 
   const response = await fetch(`${API_BASE}/api/meetings?id=${encodeURIComponent(id)}`)
@@ -174,4 +199,172 @@ export async function searchMeetings(query: string): Promise<{ meetings: Meeting
   console.log('Search results:', data.meetings.length)
 
   return { meetings: data.meetings }
+}
+
+export function downloadTranscript(meeting: MeetingWithRelations, format: 'txt' | 'md' = 'txt'): void {
+  let content: string
+  let filename: string
+  let mimeType: string
+
+  if (format === 'md') {
+    content = generateMarkdownExport(meeting)
+    filename = `${sanitizeFilename(meeting.title)}.md`
+    mimeType = 'text/markdown'
+  } else {
+    content = generateTextExport(meeting)
+    filename = `${sanitizeFilename(meeting.title)}.txt`
+    mimeType = 'text/plain'
+  }
+
+  const blob = new Blob([content], { type: `${mimeType};charset=utf-8` })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  URL.revokeObjectURL(url)
+}
+
+function sanitizeFilename(name: string): string {
+  return name
+    .replace(/[<>:"/\\|?*]/g, '-')
+    .replace(/\s+/g, '_')
+    .slice(0, 100)
+}
+
+function generateTextExport(meeting: MeetingWithRelations): string {
+  const lines: string[] = [
+    `MEETING TRANSCRIPT`,
+    `==================`,
+    ``,
+    `Title: ${meeting.title}`,
+    `Date: ${new Date(meeting.date).toLocaleString()}`,
+    ``,
+  ]
+
+  if (meeting.summary) {
+    lines.push(`SUMMARY`, `-------`, meeting.summary, ``)
+  }
+
+  if (meeting.topics?.length) {
+    lines.push(`TOPICS`, `------`, meeting.topics.join(', '), ``)
+  }
+
+  if (meeting.projects?.length) {
+    lines.push(`PROJECTS`, `--------`, meeting.projects.join(', '), ``)
+  }
+
+  if (meeting.actionItems.length) {
+    lines.push(`ACTION ITEMS`, `------------`)
+    meeting.actionItems.forEach((item, i) => {
+      const status = item.status === 'done' ? '[x]' : '[ ]'
+      lines.push(`${i + 1}. ${status} ${item.task}`)
+      if (item.assignee) lines.push(`   Assigned: ${item.assignee}`)
+      if (item.due_date) lines.push(`   Due: ${new Date(item.due_date).toLocaleDateString()}`)
+      lines.push(`   Priority: ${item.priority}`)
+    })
+    lines.push(``)
+  }
+
+  if (meeting.decisions.length) {
+    lines.push(`DECISIONS`, `---------`)
+    meeting.decisions.forEach((d, i) => {
+      lines.push(`${i + 1}. ${d.decision}`)
+      if (d.context) lines.push(`   Context: ${d.context}`)
+    })
+    lines.push(``)
+  }
+
+  if (meeting.risks.length) {
+    lines.push(`RISKS`, `-----`)
+    meeting.risks.forEach((r, i) => {
+      lines.push(`${i + 1}. [${r.severity.toUpperCase()}] ${r.risk}`)
+      if (r.mitigation) lines.push(`   Mitigation: ${r.mitigation}`)
+    })
+    lines.push(``)
+  }
+
+  if (meeting.followUps.length) {
+    lines.push(`FOLLOW-UPS`, `----------`)
+    meeting.followUps.forEach((f, i) => {
+      lines.push(`${i + 1}. ${f.purpose}`)
+      if (f.attendees.length) lines.push(`   Attendees: ${f.attendees.join(', ')}`)
+      if (f.suggested_date) lines.push(`   Suggested: ${new Date(f.suggested_date).toLocaleDateString()}`)
+    })
+    lines.push(``)
+  }
+
+  lines.push(`TRANSCRIPT`, `----------`, meeting.transcript)
+
+  return lines.join('\n')
+}
+
+function generateMarkdownExport(meeting: MeetingWithRelations): string {
+  const lines: string[] = [
+    `# ${meeting.title}`,
+    ``,
+    `**Date:** ${new Date(meeting.date).toLocaleString()}`,
+    ``,
+  ]
+
+  if (meeting.summary) {
+    lines.push(`## Summary`, ``, meeting.summary, ``)
+  }
+
+  if (meeting.topics?.length) {
+    lines.push(`## Topics`, ``, meeting.topics.map(t => `- ${t}`).join('\n'), ``)
+  }
+
+  if (meeting.projects?.length) {
+    lines.push(`## Projects`, ``, meeting.projects.map(p => `- ${p}`).join('\n'), ``)
+  }
+
+  if (meeting.actionItems.length) {
+    lines.push(`## Action Items`, ``)
+    meeting.actionItems.forEach(item => {
+      const checkbox = item.status === 'done' ? '[x]' : '[ ]'
+      let line = `- ${checkbox} ${item.task}`
+      const meta: string[] = []
+      if (item.assignee) meta.push(`@${item.assignee}`)
+      if (item.due_date) meta.push(`due: ${new Date(item.due_date).toLocaleDateString()}`)
+      meta.push(`priority: ${item.priority}`)
+      line += ` *(${meta.join(', ')})*`
+      lines.push(line)
+    })
+    lines.push(``)
+  }
+
+  if (meeting.decisions.length) {
+    lines.push(`## Decisions`, ``)
+    meeting.decisions.forEach(d => {
+      lines.push(`- **${d.decision}**${d.context ? `: ${d.context}` : ''}`)
+    })
+    lines.push(``)
+  }
+
+  if (meeting.risks.length) {
+    lines.push(`## Risks`, ``)
+    meeting.risks.forEach(r => {
+      const badge = r.severity === 'high' ? '🔴' : r.severity === 'medium' ? '🟡' : '🟢'
+      lines.push(`- ${badge} **${r.risk}**${r.mitigation ? ` — Mitigation: ${r.mitigation}` : ''}`)
+    })
+    lines.push(``)
+  }
+
+  if (meeting.followUps.length) {
+    lines.push(`## Follow-ups`, ``)
+    meeting.followUps.forEach(f => {
+      let line = `- ${f.purpose}`
+      if (f.attendees.length) line += ` *(${f.attendees.join(', ')})*`
+      if (f.suggested_date) line += ` — ${new Date(f.suggested_date).toLocaleDateString()}`
+      lines.push(line)
+    })
+    lines.push(``)
+  }
+
+  lines.push(`## Transcript`, ``, '```', meeting.transcript, '```')
+
+  return lines.join('\n')
 }
