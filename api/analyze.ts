@@ -50,7 +50,10 @@ function getAnthropicClient() {
   if (!apiKey) {
     throw new Error('Missing ANTHROPIC_API_KEY environment variable')
   }
-  return new Anthropic({ apiKey })
+  return new Anthropic({ 
+    apiKey,
+    timeout: 50000,
+  })
 }
 
 function parseJsonResponse(content: string) {
@@ -234,7 +237,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     })
   } catch (error) {
     console.error('Analysis error:', error)
-    const message = error instanceof Error ? error.message : 'Analysis failed'
+    let message = 'Analysis failed'
+    if (error instanceof Error) {
+      message = error.message
+      // Log more details for Anthropic errors
+      if ('status' in error) {
+        console.error('API Status:', (error as { status?: number }).status)
+      }
+      if ('error' in error) {
+        console.error('API Error:', JSON.stringify((error as { error?: unknown }).error))
+      }
+    }
     return res.status(500).json({ success: false, error: message })
   }
 }
