@@ -30,11 +30,158 @@ export interface ParsedTranscript {
   format: 'vtt' | 'teams-text' | 'srt' | 'plain'
 }
 
-// Teams Graph API placeholder
+const GRAPH_API_BASE = 'https://graph.microsoft.com/v1.0'
+const DEFAULT_MEETING_LIMIT = 25
+
+interface GraphListResponse<T> {
+  value: T[]
+}
+
+interface GraphUserIdentity {
+  displayName?: string
+}
+
+interface GraphMeetingParticipant {
+  identity?: {
+    user?: GraphUserIdentity
+  }
+}
+
+interface GraphMeetingParticipants {
+  organizer?: GraphMeetingParticipant
+  attendees?: GraphMeetingParticipant[]
+}
+
+interface GraphMeeting {
+  id: string
+  subject?: string
+  startDateTime?: string
+  endDateTime?: string
+  participants?: GraphMeetingParticipants
+}
+
+interface GraphTranscript {
+  id: string
+}
+
+async function fetchGraphJson<T>(token: string, url: string): Promise<T> {
+  const response = await fetch(url, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/json',
+    },
+  })
+
+  if (!response.ok) {
+    let message = response.statusText
+    try {
+      const errorBody = await response.json()
+      if (typeof errorBody?.error?.message === 'string') {
+        message = errorBody.error.message
+      }
+    } catch {
+      // Ignore JSON parsing errors to preserve status text.
+    }
+    throw new Error(`Graph API request failed (${response.status}): ${message}`)
+  }
+
+  return response.json() as Promise<T>
+}
+
+async function fetchGraphText(token: string, url: string): Promise<string | null> {
+  const response = await fetch(url, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: 'text/vtt',
+    },
+  })
+
+  if (!response.ok) {
+    console.warn('Graph API transcript content request failed:', response.status, response.statusText)
+    return null
+  }
+
+  return response.text()
+}
+
+function extractGraphParticipantNames(participants?: GraphMeetingParticipants): string[] {
+  const names = new Set<string>()
+  const maybeAddName = (name?: string) => {
+    if (name) {
+      names.add(name)
+    }
+  }
+
+  maybeAddName(participants?.organizer?.identity?.user?.displayName)
+  participants?.attendees?.forEach((attendee) => {
+    maybeAddName(attendee?.identity?.user?.displayName)
+  })
+
+  return Array.from(names)
+}
+
 export async function getTeamsTranscripts(): Promise<TeamsTranscript[]> {
   const token = typeof localStorage !== 'undefined' ? localStorage.getItem('graph_access_token') : null
   if (!token) return []
-  return []
+
+  try {
+    const meetingsResponse = await fetchGraphJson<GraphListResponse<GraphMeeting>>(
+      token,
+      `${GRAPH_API_BASE}/me/onlineMeetings?$select=id,subject,startDateTime,endDateTime,participants&$top=${DEFAULT_MEETING_LIMIT}`
+    )
+
+    const meetings = meetingsResponse.value || []
+    const transcriptGroups = await Promise.all(
+      meetings.map(async (meeting) => {
+        if (!meeting.id) return []
+
+        let transcriptsResponse: GraphListResponse<GraphTranscript>
+        try {
+          transcriptsResponse = await fetchGraphJson<GraphListResponse<GraphTranscript>>(
+            token,
+            `${GRAPH_API_BASE}/communications/onlineMeetings/${encodeURIComponent(meeting.id)}/transcripts`
+          )
+        } catch (error) {
+          console.warn('Failed to fetch transcripts for meeting:', meeting.id, error)
+          return []
+        }
+
+        const meetingParticipants = extractGraphParticipantNames(meeting.participants)
+        const transcripts = await Promise.all(
+          (transcriptsResponse.value || []).map(async (transcript) => {
+            if (!transcript.id) return null
+
+            const content = await fetchGraphText(
+              token,
+              `${GRAPH_API_BASE}/communications/onlineMeetings/${encodeURIComponent(meeting.id)}/transcripts/${encodeURIComponent(transcript.id)}/content?$format=text/vtt`
+            )
+            if (!content) return null
+
+            const parsed = parseTranscript(content)
+            const participants = new Set<string>(meetingParticipants)
+            parsed.participants.forEach((participant) => participants.add(participant))
+
+            return {
+              id: transcript.id,
+              meetingId: meeting.id,
+              title: meeting.subject || 'Untitled Meeting',
+              startTime: meeting.startDateTime || '',
+              endTime: meeting.endDateTime || '',
+              participants: Array.from(participants),
+              transcriptText: parsed.rawText,
+            } satisfies TeamsTranscript
+          })
+        )
+
+        return transcripts.filter((transcript): transcript is TeamsTranscript => Boolean(transcript))
+      })
+    )
+
+    return transcriptGroups.flat()
+  } catch (error) {
+    console.error('Failed to fetch Teams transcripts:', error)
+    return []
+  }
 }
 
 export const teamsConnectionInstructions = `
