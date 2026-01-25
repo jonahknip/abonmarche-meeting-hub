@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Meeting Hub | Abonmarche</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        
+        body {
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #2d1b4e 50%, #4c1d6e 100%);
+            min-height: 100vh;
+            color: #fff;
+        }
+        
+        .slide {
+            display: none;
+            min-height: 100vh;
+            padding: 60px;
+            animation: fadeIn 0.5s ease;
+        }
+        
+        .slide.active { display: block; }
+        
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
+        /* Slide 1: Overview */
+        .overview-header {
+            text-align: center;
+            margin-bottom: 60px;
+        }
+        
+        .overview-header h1 {
+            font-size: 3.5rem;
+            font-weight: 300;
+            margin-bottom: 10px;
+            background: linear-gradient(90deg, #fff, #c084fc);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        
+        .overview-header .tagline {
+            font-size: 1.4rem;
+            color: #94a3b8;
+            font-weight: 300;
+        }
+        
+        .content-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 60px;
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        
+        .section-title {
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            color: #64748b;
+            margin-bottom: 24px;
+        }
+        
+        .problem-list, .solution-list {
+            list-style: none;
+        }
+        
+        .problem-list li, .solution-list li {
+            padding: 16px 0;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+            display: flex;
+            align-items: flex-start;
+            gap: 16px;
+            font-size: 1.1rem;
+            line-height: 1.5;
+        }
+        
+        .problem-list li:last-child, .solution-list li:last-child {
+            border-bottom: none;
+        }
+        
+        .icon {
+            width: 32px;
+            height: 32px;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+            font-size: 1rem;
+        }
+        
+        .icon.problem { background: rgba(239, 68, 68, 0.2); color: #f87171; }
+        .icon.solution { background: rgba(34, 197, 94, 0.2); color: #4ade80; }
+        
+        .tech-stack {
+            display: flex;
+            justify-content: center;
+            gap: 16px;
+            margin-top: 60px;
+            padding-top: 40px;
+            border-top: 1px solid rgba(255,255,255,0.1);
+            flex-wrap: wrap;
+        }
+        
+        .tech-badge {
+            background: rgba(255,255,255,0.1);
+            padding: 8px 20px;
+            border-radius: 20px;
+            font-size: 0.9rem;
+            color: #c084fc;
+            border: 1px solid rgba(192, 132, 252, 0.3);
+        }
+        
+        /* Slide 2: Demo */
+        .demo-container {
+            height: calc(100vh - 120px);
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .demo-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+        
+        .demo-header h2 {
+            font-size: 1.5rem;
+            font-weight: 400;
+        }
+        
+        .demo-link {
+            font-size: 0.9rem;
+            color: #c084fc;
+            text-decoration: none;
+        }
+        
+        .demo-link:hover { text-decoration: underline; }
+        
+        .demo-frame {
+            flex: 1;
+            background: #1e1e2e;
+            border-radius: 12px;
+            overflow: hidden;
+            border: 1px solid rgba(255,255,255,0.1);
+            position: relative;
+        }
+        
+        .demo-frame iframe {
+            width: 100%;
+            height: 100%;
+            border: none;
+        }
+        
+        .loading-overlay {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            background: #1e1e2e;
+            color: #64748b;
+            transition: opacity 0.3s ease;
+        }
+        
+        .loading-overlay.hidden {
+            opacity: 0;
+            pointer-events: none;
+        }
+        
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 3px solid rgba(192, 132, 252, 0.2);
+            border-top-color: #c084fc;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-bottom: 16px;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        
+        /* Navigation */
+        .nav {
+            position: fixed;
+            bottom: 30px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            gap: 8px;
+            background: rgba(0,0,0,0.3);
+            padding: 8px;
+            border-radius: 20px;
+            backdrop-filter: blur(10px);
+        }
+        
+        .nav-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: rgba(255,255,255,0.3);
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+        
+        .nav-dot.active {
+            background: #c084fc;
+            width: 30px;
+            border-radius: 5px;
+        }
+        
+        .nav-hint {
+            position: fixed;
+            bottom: 30px;
+            right: 30px;
+            font-size: 0.8rem;
+            color: #64748b;
+        }
+    </style>
+</head>
+<body>
+    <!-- Slide 1: Overview -->
+    <div class="slide active" id="slide1">
+        <div class="overview-header">
+            <h1>Meeting Hub</h1>
+            <p class="tagline">AI-powered meeting intelligence for engineering teams</p>
+        </div>
+        
+        <div class="content-grid">
+            <div class="problem-section">
+                <div class="section-title">The Problem</div>
+                <ul class="problem-list">
+                    <li>
+                        <span class="icon problem">📝</span>
+                        <span>Meeting notes scattered across emails, chats, notebooks</span>
+                    </li>
+                    <li>
+                        <span class="icon problem">⏰</span>
+                        <span>Action items get lost — nothing gets followed up</span>
+                    </li>
+                    <li>
+                        <span class="icon problem">🔄</span>
+                        <span>Decisions made but not documented anywhere</span>
+                    </li>
+                    <li>
+                        <span class="icon problem">❓</span>
+                        <span>"What did we decide in that meeting last month?"</span>
+                    </li>
+                </ul>
+            </div>
+            
+            <div class="solution-section">
+                <div class="section-title">The Solution</div>
+                <ul class="solution-list">
+                    <li>
+                        <span class="icon solution">📤</span>
+                        <span>Upload transcript — AI extracts everything</span>
+                    </li>
+                    <li>
+                        <span class="icon solution">✅</span>
+                        <span>Action items auto-assigned to team members</span>
+                    </li>
+                    <li>
+                        <span class="icon solution">📋</span>
+                        <span>Decision log with context and dates</span>
+                    </li>
+                    <li>
+                        <span class="icon solution">📊</span>
+                        <span>Export reports for distribution</span>
+                    </li>
+                </ul>
+            </div>
+        </div>
+        
+        <div class="tech-stack">
+            <span class="tech-badge">React</span>
+            <span class="tech-badge">TypeScript</span>
+            <span class="tech-badge">Claude AI</span>
+            <span class="tech-badge">Vercel</span>
+            <span class="tech-badge">Tailwind CSS</span>
+        </div>
+    </div>
+    
+    <!-- Slide 2: Demo -->
+    <div class="slide" id="slide2">
+        <div class="demo-container">
+            <div class="demo-header">
+                <h2>Live Demo</h2>
+                <a href="https://abonmarche-meeting-hub.vercel.app" target="_blank" class="demo-link">
+                    Open in new tab ↗
+                </a>
+            </div>
+            <div class="demo-frame">
+                <div class="loading-overlay" id="loading">
+                    <div class="spinner"></div>
+                    <p>Loading Meeting Hub...</p>
+                </div>
+                <iframe 
+                    src="https://abonmarche-meeting-hub.vercel.app" 
+                    onload="document.getElementById('loading').classList.add('hidden')"
+                ></iframe>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Navigation -->
+    <div class="nav">
+        <div class="nav-dot active" onclick="goToSlide(0)"></div>
+        <div class="nav-dot" onclick="goToSlide(1)"></div>
+    </div>
+    <div class="nav-hint">← → to navigate</div>
+    
+    <script>
+        let currentSlide = 0;
+        const slides = document.querySelectorAll('.slide');
+        const dots = document.querySelectorAll('.nav-dot');
+        
+        function goToSlide(n) {
+            slides[currentSlide].classList.remove('active');
+            dots[currentSlide].classList.remove('active');
+            currentSlide = n;
+            slides[currentSlide].classList.add('active');
+            dots[currentSlide].classList.add('active');
+        }
+        
+        function nextSlide() { goToSlide((currentSlide + 1) % slides.length); }
+        function prevSlide() { goToSlide((currentSlide - 1 + slides.length) % slides.length); }
+        
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'ArrowRight' || e.key === ' ') nextSlide();
+            if (e.key === 'ArrowLeft') prevSlide();
+        });
+    </script>
+</body>
+</html>

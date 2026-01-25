@@ -4,6 +4,7 @@ import * as Tabs from '@radix-ui/react-tabs'
 import { useDropzone } from 'react-dropzone'
 import { AlertCircle, CalendarClock, CheckCircle2, FileText, Loader2, Monitor, Upload, X } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
+import mammoth from 'mammoth'
 import { uploadTranscript, analyzeMeeting } from '../lib/api'
 import { useToast } from './Toast'
 import { parseTranscript, validateTranscript, detectTranscriptFormat } from '../lib/teams'
@@ -11,6 +12,7 @@ import { parseTranscript, validateTranscript, detectTranscriptFormat } from '../
 const ACCEPT = {
   'text/plain': ['.txt'],
   'text/vtt': ['.vtt'],
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx'],
 }
 
 const MAX_BYTES = 10 * 1024 * 1024
@@ -42,6 +44,7 @@ export function UploadModal({ open, onOpenChange }: UploadModalProps) {
   const [error, setError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const [progress, setProgress] = useState<'idle' | 'uploading' | 'analyzing' | 'extracting' | 'done'>('idle')
+  const [isProcessingFile, setIsProcessingFile] = useState(false)
 
   const processContent = useCallback((content: string, source: string) => {
     setError(null)
@@ -66,6 +69,12 @@ export function UploadModal({ open, onOpenChange }: UploadModalProps) {
     }
   }, [title])
 
+  const extractTextFromDocx = async (file: File): Promise<string> => {
+    const arrayBuffer = await file.arrayBuffer()
+    const result = await mammoth.extractRawText({ arrayBuffer })
+    return result.value
+  }
+
   const onDrop = useCallback(async (acceptedFiles: File[]) => {
     setError(null)
     const file = acceptedFiles[0]
@@ -77,11 +86,31 @@ export function UploadModal({ open, onOpenChange }: UploadModalProps) {
     }
 
     const ext = file.name.toLowerCase()
-    if (ext.endsWith('.pdf') || ext.endsWith('.docx')) {
-      setError('PDF/DOCX files cannot be read directly. Please copy the transcript text and use the "Paste text" tab.')
+
+    // Handle DOCX files
+    if (ext.endsWith('.docx')) {
+      setIsProcessingFile(true)
+      try {
+        const text = await extractTextFromDocx(file)
+        setFileName(file.name)
+        processContent(text, file.name)
+        setDetectedFormat('Word Document')
+      } catch (err) {
+        console.error('DOCX parse error:', err)
+        setError('Failed to read Word document. Please try copying the text and pasting it.')
+      } finally {
+        setIsProcessingFile(false)
+      }
       return
     }
 
+    // Handle PDF (still not supported)
+    if (ext.endsWith('.pdf')) {
+      setError('PDF files not supported yet. Please copy the transcript text and use "Paste text" tab.')
+      return
+    }
+
+    // Handle text files
     try {
       const text = await file.text()
       setFileName(file.name)
@@ -226,7 +255,7 @@ export function UploadModal({ open, onOpenChange }: UploadModalProps) {
                 New Meeting Upload
               </Dialog.Title>
               <Dialog.Description className="text-sm text-text-secondary">
-                Drop a transcript file or paste text. Supports Teams VTT, plain text, and copy/paste formats.
+                Drop a transcript file or paste text. Supports Teams VTT, Word docs, plain text, and copy/paste.
               </Dialog.Description>
             </div>
             <Dialog.Close className="rounded-button p-1 text-text-secondary hover:text-text-primary hover:bg-white/5">
@@ -271,14 +300,25 @@ export function UploadModal({ open, onOpenChange }: UploadModalProps) {
                     }`}
                   >
                     <input {...getInputProps()} />
-                    <Upload className="mx-auto h-10 w-10 text-primary" />
-                    <div className="mt-3 text-text-primary font-semibold">
-                      {isDragActive ? 'Drop it here!' : 'Drop transcript here or click to upload'}
-                    </div>
-                    <div className="mt-1 text-sm text-text-secondary">
-                      Accepts .txt, .vtt files (max 10MB)
-                    </div>
-                    {fileName && (
+                    {isProcessingFile ? (
+                      <>
+                        <Loader2 className="mx-auto h-10 w-10 text-primary animate-spin" />
+                        <div className="mt-3 text-text-primary font-semibold">
+                          Processing document...
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <Upload className="mx-auto h-10 w-10 text-primary" />
+                        <div className="mt-3 text-text-primary font-semibold">
+                          {isDragActive ? 'Drop it here!' : 'Drop transcript here or click to upload'}
+                        </div>
+                        <div className="mt-1 text-sm text-text-secondary">
+                          Accepts .txt, .vtt, .docx files (max 10MB)
+                        </div>
+                      </>
+                    )}
+                    {fileName && !isProcessingFile && (
                       <div className="mt-3 inline-flex items-center gap-2 rounded-button border border-success/50 bg-success/10 px-3 py-1 text-sm text-success">
                         <FileText className="h-4 w-4" />
                         {fileName}
@@ -295,7 +335,8 @@ export function UploadModal({ open, onOpenChange }: UploadModalProps) {
 Supported formats:
 • Teams VTT transcripts
 • Copy/paste from Teams transcript view
-• Plain text transcripts"
+• Plain text transcripts
+• Copied text from Word documents"
                     value={rawContent}
                     onChange={(e) => handlePaste(e.target.value)}
                   />
@@ -318,7 +359,7 @@ Supported formats:
                       </li>
                       <li className="flex gap-3">
                         <span className="flex-shrink-0 w-6 h-6 rounded-full bg-primary/20 text-primary flex items-center justify-center text-xs font-semibold">3</span>
-                        <span>Click <strong>"Download"</strong> and choose <strong>.vtt</strong> format (recommended)</span>
+                        <span>Click <strong>"Download"</strong> and choose <strong>.vtt</strong> or <strong>.docx</strong> format</span>
                       </li>
                       <li className="flex gap-3">
                         <span className="flex-shrink-0 w-6 h-6 rounded-full bg-primary/20 text-primary flex items-center justify-center text-xs font-semibold">4</span>
@@ -416,7 +457,7 @@ Supported formats:
                 </Dialog.Close>
                 <button
                   type="submit"
-                  disabled={submitting || !hasContent}
+                  disabled={submitting || !hasContent || isProcessingFile}
                   className="inline-flex items-center gap-2 rounded-button bg-primary px-4 py-2 text-sm font-semibold text-white shadow-lg shadow-primary/20 hover:bg-primary/90 disabled:opacity-60 disabled:cursor-not-allowed"
                 >
                   {submitting && <Loader2 className="h-4 w-4 animate-spin" />}
