@@ -1,0 +1,58 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --abon-blue: #003087;
+    --abon-gold: #C8A951;
+  }
+  * { -webkit-font-smoothing: antialiased; }
+  html { scroll-behavior: smooth; }
+  body {
+    @apply bg-white text-gray-900;
+    font-feature-settings: "kern" 1, "liga" 1;
+    letter-spacing: -0.011em;
+  }
+}
+
+@layer utilities {
+  .glass {
+    backdrop-filter: blur(20px) saturate(180%);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    background: rgba(255,255,255,0.72);
+    border-bottom: 1px solid rgba(0,0,0,0.06);
+  }
+  .glass-card {
+    backdrop-filter: blur(12px);
+    background: rgba(255,255,255,0.7);
+    border: 1px solid rgba(255,255,255,0.9);
+  }
+  .text-gradient {
+    background: linear-gradient(135deg, #003087 0%, #0050CC 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+  .gold-gradient {
+    background: linear-gradient(135deg, #8B6914 0%, #C8A951 50%, #D4B96B 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+  .hero-bg {
+    background: radial-gradient(ellipse 80% 50% at 50% -10%, rgba(0,48,135,0.12) 0%, transparent 60%),
+                linear-gradient(180deg, #f5f7fa 0%, #fff 60%);
+  }
+  .animate-delay-100 { animation-delay: 100ms; }
+  .animate-delay-200 { animation-delay: 200ms; }
+  .animate-delay-300 { animation-delay: 300ms; }
+  .animate-delay-400 { animation-delay: 400ms; }
+  .chat-bubble-ai {
+    background: linear-gradient(135deg, #f0f4ff 0%, #e8edf8 100%);
+    border: 1px solid rgba(0,48,135,0.1);
+  }
+  .scrollbar-thin::-webkit-scrollbar { width: 4px; }
+  .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
+  .scrollbar-thin::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.15); border-radius: 2px; }
+}

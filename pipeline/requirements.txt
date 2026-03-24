@@ -1,0 +1,4 @@
+anthropic>=0.18.0
+supabase>=2.3.0
+watchdog>=4.0.0
+openai-whisper>=20231117
